@@ -13,52 +13,51 @@ Layout::
       }
     }
 
-The first fleet added becomes the default automatically. Removing the current
-default falls back to the alphabetically-first remaining fleet, or ``None``
-if none remain.
+The first fleet added becomes the default automatically. Removing the
+current default falls back to the alphabetically-first remaining fleet, or
+``None`` if none remain.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from fleet.config import FleetError
-
-# ----------------------------------------------------------------------------
-# Constants
-# ----------------------------------------------------------------------------
+from fleet.errors import FleetError
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-]{0,31}$")
 
 
 def _config_file() -> Path:
-    """Resolve the path to fleets.json.
+    """Resolve the path to ``fleets.json``.
 
     Resolution order:
-      1. ``FLEET_CONFIG_PATH`` env var (explicit override; absolute path)
-      2. ``%LOCALAPPDATA%\\fleet\\fleets.json`` on Windows
-      3. ``$XDG_CONFIG_HOME/fleet/fleets.json`` on Linux/macOS
-      4. ``~/.config/fleet/fleets.json`` (XDG default)
+      1. ``FLEET_CONFIG_PATH`` env var (explicit override).
+      2. On Windows: ``%LOCALAPPDATA%\\fleet\\fleets.json``.
+      3. On other platforms: ``$XDG_CONFIG_HOME/fleet/fleets.json``,
+         falling back to ``~/.config/fleet/fleets.json``.
     """
     override = os.environ.get("FLEET_CONFIG_PATH")
     if override:
         return Path(override).resolve()
-    local_appdata = os.environ.get("LOCALAPPDATA")
-    if local_appdata:
-        return Path(local_appdata) / "fleet" / "fleets.json"
+    # Read sys.platform via getattr so mypy doesn't decide one branch is
+    # unreachable based on the platform it's currently type-checking on.
+    if getattr(sys, "platform", "") == "win32":
+        local_appdata = os.environ.get("LOCALAPPDATA")
+        if local_appdata:
+            return Path(local_appdata) / "fleet" / "fleets.json"
+        # Fallback when LOCALAPPDATA isn't set (rare; exotic environments).
+        return Path.home() / "AppData" / "Local" / "fleet" / "fleets.json"
     xdg = os.environ.get("XDG_CONFIG_HOME")
     if xdg:
         return Path(xdg) / "fleet" / "fleets.json"
     return Path.home() / ".config" / "fleet" / "fleets.json"
 
-
-# ----------------------------------------------------------------------------
-# Model
-# ----------------------------------------------------------------------------
 
 @dataclass
 class FleetEntry:
@@ -74,13 +73,13 @@ class FleetsConfig:
     # ------------------------------ load / save ------------------------------
 
     @classmethod
-    def load(cls) -> "FleetsConfig":
+    def load(cls) -> FleetsConfig:
         path = _config_file()
         if path.is_file():
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
             except json.JSONDecodeError as e:
-                raise FleetError(f"Malformed fleets config at {path}: {e}")
+                raise FleetError(f"Malformed fleets config at {path}: {e}") from e
             fleets: dict[str, FleetEntry] = {}
             raw = data.get("fleets") if isinstance(data, dict) else None
             if isinstance(raw, dict):
@@ -93,7 +92,6 @@ class FleetsConfig:
             if not isinstance(default, str) or default not in fleets:
                 default = None
             return cls(default=default, fleets=fleets)
-
         return cls(default=None, fleets={})
 
     def save(self) -> None:
@@ -112,29 +110,13 @@ class FleetsConfig:
             os.replace(tmp, path)
         finally:
             if tmp.exists():
-                try:
+                with contextlib.suppress(OSError):
                     tmp.unlink()
-                except OSError:
-                    pass
 
     # ------------------------------ mutators ---------------------------------
 
     def add(self, name: str, root: Path, force: bool = False) -> None:
-        if not _NAME_RE.match(name):
-            raise FleetError(
-                f"Invalid fleet name '{name}'. Must start with a letter/digit "
-                "and contain only A-Z, a-z, 0-9, '.', '_', '-' (max 32 chars)."
-            )
-        # The name appears as a component of `task/<fleet>/<task>` git refs.
-        # Rule out the same git-ref edge cases _validate_task_name covers.
-        if (".." in name
-                or name.startswith(".") or name.endswith(".")
-                or name.endswith(".lock") or "@{" in name):
-            raise FleetError(
-                f"Invalid fleet name '{name}': would produce an invalid git "
-                "ref (no '..', no leading/trailing '.', no '.lock' suffix, "
-                "no '@{')."
-            )
+        _validate_fleet_name(name)
         if name in self.fleets and not force:
             raise FleetError(
                 f"Fleet '{name}' already registered "
@@ -167,7 +149,7 @@ class FleetsConfig:
     # ------------------------------ resolution -------------------------------
 
     def resolve(self, override: str | None) -> FleetEntry:
-        """Return the active fleet entry. `override` wins over `default`."""
+        """Return the active fleet entry. ``override`` wins over ``default``."""
         if override is not None:
             entry = self.fleets.get(override)
             if entry is None:
@@ -187,6 +169,27 @@ class FleetsConfig:
                 f"(known fleets: {', '.join(sorted(self.fleets))})."
             )
         return self.fleets[self.default]
+
+
+def _validate_fleet_name(name: str) -> None:
+    """Reject fleet names that aren't safe to use as a git ref segment.
+
+    The name appears in ``task/<fleet>/<task>`` git refs, so it must satisfy
+    git's ref-format rules in addition to our character whitelist.
+    """
+    if not _NAME_RE.match(name):
+        raise FleetError(
+            f"Invalid fleet name '{name}'. Must start with a letter/digit "
+            "and contain only A-Z, a-z, 0-9, '.', '_', '-' (max 32 chars)."
+        )
+    if (".." in name
+            or name.startswith(".") or name.endswith(".")
+            or name.endswith(".lock") or "@{" in name):
+        raise FleetError(
+            f"Invalid fleet name '{name}': would produce an invalid git "
+            "ref (no '..', no leading/trailing '.', no '.lock' suffix, "
+            "no '@{')."
+        )
 
 
 def config_path() -> Path:

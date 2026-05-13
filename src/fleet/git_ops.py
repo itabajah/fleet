@@ -11,7 +11,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from fleet.config import FleetError
+from fleet.errors import FleetError
 
 # Patterns from sync.ps1's $invokeWithRetry — used to decide whether a git
 # invocation actually failed or just emitted noise (Windows filesystem

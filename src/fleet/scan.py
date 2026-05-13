@@ -1,11 +1,6 @@
-"""`fleet scan` — walk the disk, rewrite fleet.json preserving manual settings.
+"""``fleet scan`` — walk the disk, rewrite ``fleet.json`` preserving manual settings.
 
-Port of sync.ps1's -Scan mode (Add-ExpandedSubfolder / ConvertTo-FolderNode /
-Invoke-CollapseNodes / Invoke-SortNodes / Invoke-CleanupNodes / Get-Or-Create-Node).
-The Python version is shorter because there's no PSCustomObject vs IDictionary
-discrimination — everything is a plain dict.
-
-Output shape:
+Output shape::
 
     {
       "root": ".",
@@ -24,94 +19,23 @@ Output shape:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
-import re
 from pathlib import Path
 
-from fleet.config import (
-    PRUNE_DIRS,
-    REGISTRY_FILENAME,
-    ROOT_META_KEYS,
-    TOOL_HOME_DIRNAME,
-    cyan,
-    find_repos_root,
-    fleet_install_dir,
-    gray,
-    green,
-    load_registry,
-    yellow,
-)
-
-
-# ---------------------------------------------------------------------------
-# Node model
-# ---------------------------------------------------------------------------
-
-def _empty_node() -> dict:
-    return {"sync": True, "repos": [], "exclude": [], "subfolders": {}}
-
-
-def _normalize_existing(raw) -> dict:
-    """Convert a raw registry node into normalized form (single-segment subkeys)."""
-    if not isinstance(raw, dict):
-        return _empty_node()
-    node = {
-        "sync": bool(raw.get("sync", True)),
-        "repos": list(raw.get("repos") or []),
-        "exclude": list(raw.get("exclude") or []),
-        "subfolders": {},
-    }
-    raw_subs = raw.get("subfolders") or {}
-    if isinstance(raw_subs, dict):
-        for key, val in raw_subs.items():
-            _insert_collapsed(node["subfolders"], key, val)
-    return node
-
-
-def _insert_collapsed(parent: dict, raw_key: str, raw_value) -> None:
-    """Insert a possibly-collapsed key like 'a/b/c' into `parent`."""
-    parts = [p for p in re.split(r"[\\/]+", raw_key) if p]
-    if not parts:
-        return
-    cur = parent
-    for seg in parts[:-1]:
-        if seg not in cur:
-            cur[seg] = _empty_node()
-        cur = cur[seg]["subfolders"]
-    leaf = parts[-1]
-    expanded = _normalize_existing(raw_value)
-    if leaf in cur:
-        existing = cur[leaf]
-        existing["sync"] = existing["sync"] and expanded["sync"]
-        existing["repos"] = sorted(set(existing["repos"]) | set(expanded["repos"]))
-        existing["exclude"] = sorted(
-            set(existing["exclude"]) | set(expanded["exclude"])
-        )
-        for k, v in expanded["subfolders"].items():
-            existing["subfolders"].setdefault(k, v)
-    else:
-        cur[leaf] = expanded
-
-
-def _expanded_existing(raw_config: dict) -> dict:
-    """Normalize the entire existing registry into a tree of single-segment keys."""
-    expanded: dict = {}
-    if not isinstance(raw_config, dict):
-        return expanded
-    for key, val in raw_config.items():
-        if key in ROOT_META_KEYS:
-            continue
-        _insert_collapsed(expanded, key, val)
-    return expanded
-
+from fleet.console import cyan, gray, green, yellow
+from fleet.paths import REGISTRY_FILENAME
+from fleet.registry_tree import empty_node, expanded_registry
+from fleet.state import find_repos_root, load_registry
+from fleet.walker import walk_repos
 
 # ---------------------------------------------------------------------------
 # Build the new structure from disk + existing config
 # ---------------------------------------------------------------------------
 
 def _get_or_create(parent: dict, name: str, existing_node: dict | None) -> dict:
-    """Return parent[name], creating it (and recovering sync/exclude from existing)."""
+    """Return ``parent[name]``, creating it (and recovering sync/exclude from existing)."""
     if name in parent:
         return parent[name]
 
@@ -121,9 +45,10 @@ def _get_or_create(parent: dict, name: str, existing_node: dict | None) -> dict:
     if existing_node is not None:
         old: dict | None = None
         # Two ways the existing tree might address this name:
-        # 1. As a direct child of `existing_node` (when existing_node IS a level-up
-        #    in the expanded-existing tree).
-        # 2. Under existing_node["subfolders"][name] (when existing_node is a node).
+        #   1. As a direct child of `existing_node` (when existing_node is a
+        #      level-up in the expanded-existing tree).
+        #   2. Under existing_node["subfolders"][name] (when existing_node IS
+        #      a node).
         direct = existing_node.get(name)
         if isinstance(direct, dict) and "sync" in direct:
             old = direct
@@ -135,73 +60,23 @@ def _get_or_create(parent: dict, name: str, existing_node: dict | None) -> dict:
             sync = bool(old.get("sync", True))
             exclude = list(old.get("exclude") or [])
 
-    parent[name] = {
-        "sync": sync,
-        "repos": [],
-        "exclude": exclude,
-        "subfolders": {},
-    }
-    return parent[name]
-
-
-def _walk_git_dirs(root: Path):
-    """Yield directories under `root` that contain a `.git` entry. Skips ..me.
-
-    Detects both normal repos (`.git/` directory) and git worktrees (`.git`
-    file containing `gitdir: …`). Symlink/junction loops are avoided by
-    deduping resolved paths; the fleet checkout itself is also pruned.
-    """
-    prune = PRUNE_DIRS | {TOOL_HOME_DIRNAME}
-    try:
-        skip = fleet_install_dir().resolve()
-    except OSError:
-        skip = None
-    seen: set = set()
-    stack: list[Path] = [root]
-    while stack:
-        cur = stack.pop()
-        try:
-            with os.scandir(cur) as it:
-                entries = list(it)
-        except OSError:
-            continue
-        for entry in entries:
-            # `.git` may be a directory (normal repo) or a file (worktree).
-            # Either way, the parent is the repo we want to yield.
-            if entry.name == ".git":
-                yield cur
-                continue
-            try:
-                if not entry.is_dir(follow_symlinks=False):
-                    continue
-            except OSError:
-                continue
-            if entry.name in prune:
-                continue
-            p = Path(entry.path)
-            try:
-                real = p.resolve()
-            except OSError:
-                continue
-            if skip is not None and real == skip:
-                continue
-            if real in seen:
-                continue
-            seen.add(real)
-            stack.append(p)
+    node = empty_node()
+    node["sync"] = sync
+    node["exclude"] = exclude
+    parent[name] = node
+    return node
 
 
 def _build_structure(scan_root: Path, expanded_existing: dict) -> tuple[dict, int, int]:
-    """Walk disk, add every repo into the right node. Returns (structure, total, new)."""
+    """Walk disk, drop every repo into the right node. Returns ``(structure, total, new)``."""
     structure: dict = {}
     total = 0
     new_count = 0
 
-    # Use absolute scan_root for relative-path arithmetic.
     scan_root_abs = scan_root.resolve()
 
-    # Track which (group_path, repo_name) tuples were already in the existing
-    # registry so we can count "new" finds.
+    # Track which (group_path, repo_name) tuples were already in the
+    # existing registry so we can count "new" finds for the summary.
     previously_listed: set[tuple[str, ...]] = set()
 
     def _collect_listed(node: dict, prefix: tuple[str, ...]) -> None:
@@ -213,7 +88,7 @@ def _build_structure(scan_root: Path, expanded_existing: dict) -> tuple[dict, in
     for top_name, top_node in expanded_existing.items():
         _collect_listed(top_node, (top_name,))
 
-    for repo_dir in _walk_git_dirs(scan_root):
+    for repo_dir in walk_repos(scan_root):
         try:
             rel = repo_dir.resolve().relative_to(scan_root_abs)
         except ValueError:
@@ -231,11 +106,11 @@ def _build_structure(scan_root: Path, expanded_existing: dict) -> tuple[dict, in
         target_node: dict | None = None
 
         if not parent_parts:
-            # Top-level repo lives in synthetic "." node.
             target_node = _get_or_create(cur_dict, ".", cur_existing)
         else:
             disabled = False
-            for i, seg in enumerate(parent_parts):
+            node: dict | None = None
+            for seg in parent_parts:
                 node = _get_or_create(cur_dict, seg, cur_existing)
                 if not node["sync"]:
                     disabled = True
@@ -249,14 +124,13 @@ def _build_structure(scan_root: Path, expanded_existing: dict) -> tuple[dict, in
                     if isinstance(direct, dict) and "subfolders" in direct:
                         nxt = direct
                     else:
-                        subs = cur_existing.get("subfolders") if isinstance(
-                            cur_existing.get("subfolders"), dict) else None
+                        subs_obj = cur_existing.get("subfolders")
+                        subs = subs_obj if isinstance(subs_obj, dict) else None
                         nxt = subs.get(seg) if subs else None
                 cur_existing = nxt
             if disabled:
                 continue
-            # Need a node at parent_parts[-1] (already created above as `node`).
-            target_node = node  # type: ignore[possibly-undefined]
+            target_node = node
 
         if target_node is None or not target_node["sync"]:
             continue
@@ -265,9 +139,6 @@ def _build_structure(scan_root: Path, expanded_existing: dict) -> tuple[dict, in
         if repo_name not in target_node["repos"]:
             target_node["repos"].append(repo_name)
             total += 1
-            # Match against previously_listed keys, which are (top, sub..., repo).
-            # Top-level repos live under the synthetic "." node, so prefix
-            # parent_parts with "." when there is no real parent group.
             structural_key: tuple[str, ...] = (
                 (".", repo_name)
                 if not parent_parts
@@ -284,9 +155,10 @@ def _build_structure(scan_root: Path, expanded_existing: dict) -> tuple[dict, in
 # ---------------------------------------------------------------------------
 
 def _collapse(structure: dict) -> dict:
-    """Recursively collapse single-child folder nodes into 'parent/child' keys.
+    """Recursively collapse single-child folder nodes into ``parent/child`` keys.
 
-    Preserves insertion order so collapsed entries take the slot of their parent.
+    Preserves insertion order so collapsed entries take the slot of their
+    parent.
     """
     # Recurse first (bottom-up) so child structures are already collapsed.
     for key in list(structure.keys()):
@@ -309,7 +181,7 @@ def _collapse(structure: dict) -> dict:
 
 
 def _sort_arrays(structure: dict) -> None:
-    """Sort `repos` and `exclude` alphabetically (case-insensitive) at every level."""
+    """Sort ``repos`` and ``exclude`` alphabetically (case-insensitive) at every level."""
     for node in structure.values():
         node["repos"] = sorted(node["repos"], key=str.casefold)
         node["exclude"] = sorted(node["exclude"], key=str.casefold)
@@ -317,11 +189,11 @@ def _sort_arrays(structure: dict) -> None:
 
 
 def _preserve_disabled(structure: dict, existing: dict) -> None:
-    """Re-attach `sync:false` nodes from existing config that the walk missed.
+    """Re-attach ``sync:false`` nodes from existing config that the walk missed.
 
-    Folders pruned by `_walk_git_dirs` (notably `..me`) never produce nodes
-    during the disk walk. Without this pass, hand-curated disable flags would
-    silently disappear on every `fleet scan`.
+    Folders pruned by the walker (notably ``..me``) never produce nodes
+    during the disk walk. Without this pass, hand-curated disable flags
+    would silently disappear on every ``fleet scan``.
     """
     for name, node in existing.items():
         if not node.get("sync", True):
@@ -332,18 +204,17 @@ def _preserve_disabled(structure: dict, existing: dict) -> None:
                 }
             # Don't recurse: _cleanup collapses disabled nodes to {"sync": false}.
             continue
-        # Enabled in existing — only recurse into subfolders the walk already created.
+        # Enabled in existing — only recurse into subfolders the walk created.
         if name in structure:
             _preserve_disabled(structure[name]["subfolders"],
                                node.get("subfolders") or {})
 
 
 def _cleanup(structure: dict) -> None:
-    """Drop empty fields. Disabled nodes keep only their `sync` flag."""
+    """Drop empty fields. Disabled nodes keep only their ``sync`` flag."""
     for key in list(structure.keys()):
         node = structure[key]
         if not node["sync"]:
-            # Disabled: only keep `sync: false`. Drop everything else.
             structure[key] = {"sync": False}
             continue
         _cleanup(node["subfolders"])
@@ -369,6 +240,20 @@ def _count_enabled(structure: dict) -> int:
     return total
 
 
+def _atomic_write_json(path: Path, payload: dict) -> None:
+    """Write ``payload`` to ``path`` via a temp-file + rename so a crash
+    mid-write can't truncate the existing file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    try:
+        tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+
+
 # ---------------------------------------------------------------------------
 # Public command
 # ---------------------------------------------------------------------------
@@ -378,7 +263,7 @@ def cmd_scan(_args: argparse.Namespace) -> int:
     target_path = repos_root / REGISTRY_FILENAME
 
     existing_raw = load_registry()
-    expanded_existing = _expanded_existing(existing_raw)
+    expanded_existing = expanded_registry(existing_raw)
 
     config_root = "."
     if isinstance(existing_raw.get("root"), str) and existing_raw["root"]:
@@ -402,25 +287,8 @@ def cmd_scan(_args: argparse.Namespace) -> int:
     _sort_arrays(structure)
     _cleanup(structure)
 
-    final = {"root": config_root}
-    for k, v in structure.items():
-        final[k] = v
-
-    # Atomic write: stage to .tmp then replace.
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = target_path.with_suffix(target_path.suffix + ".tmp")
-    try:
-        tmp_path.write_text(
-            json.dumps(final, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        os.replace(tmp_path, target_path)
-    finally:
-        if tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except OSError:
-                pass
+    final: dict = {"root": config_root, **structure}
+    _atomic_write_json(target_path, final)
 
     enabled = _count_enabled(structure)
     print(green("✓ Scan complete."))
@@ -431,3 +299,13 @@ def cmd_scan(_args: argparse.Namespace) -> int:
     print()
     print(gray("Run `fleet sync` to update them all."))
     return 0
+
+
+def register(subparsers: argparse._SubParsersAction,
+             fleet_arg: argparse.ArgumentParser) -> None:
+    """Register the ``fleet scan`` subcommand."""
+    p = subparsers.add_parser(
+        "scan", parents=[fleet_arg],
+        help="rescan disk and rewrite fleet.json (preserves manual sync/exclude)",
+    )
+    p.set_defaults(func=cmd_scan)

@@ -8,9 +8,110 @@ version = "0.1.0"
 description = "Multi-repo workspace tool: parallel git sync + task worktree scaffolder"
 readme = "README.md"
 requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "fleet contributors" }]
+keywords = ["git", "worktree", "monorepo", "multi-repo", "cli"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Version Control :: Git",
+    "Topic :: Utilities",
+]
+# Runtime: zero dependencies. Stays that way.
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-cov>=5",
+    "ruff>=0.6",
+    "mypy>=1.10",
+]
 
 [project.scripts]
 fleet = "fleet.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# ---------------------------------------------------------------------------
+# pytest
+# ---------------------------------------------------------------------------
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --strict-config"
+markers = [
+    "unit: pure-Python tests with no real git, no subprocess, no network",
+    "integration: tests that invoke real git against local-only bare remotes",
+    "e2e: tests that subprocess the installed `python -m fleet` entry point",
+]
+filterwarnings = ["error"]
+
+# ---------------------------------------------------------------------------
+# coverage
+# ---------------------------------------------------------------------------
+
+[tool.coverage.run]
+source = ["fleet"]
+branch = true
+omit = ["src/fleet/__main__.py"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+exclude_also = [
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+    "\\.\\.\\.",
+]
+
+# ---------------------------------------------------------------------------
+# ruff
+# ---------------------------------------------------------------------------
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # bugbear
+    "SIM", # simplify
+]
+ignore = [
+    "E501", # line length — covered by formatter, not strict here
+    "B008", # function calls in default args (we use Path() defaults rarely)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]  # allow `assert False` in tests
+
+# ---------------------------------------------------------------------------
+# mypy
+# ---------------------------------------------------------------------------
+
+[tool.mypy]
+python_version = "3.10"
+files = ["src/fleet"]
+ignore_missing_imports = true
+check_untyped_defs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_unreachable = true
+strict_equality = true
+no_implicit_optional = true

@@ -1,58 +1,64 @@
-"""argparse top-level for the `fleet` CLI.
+"""Top-level argparse for the ``fleet`` CLI.
 
-Subcommands:
-  fleet sync   [--dry-run] [--workers N] [--no-auth-check] [-F NAME]
-  fleet scan   [-F NAME]
-  fleet repos  [-F NAME]
-  fleet task new   <name> --repos a,b[,group/c] [--description ...] [--no-pull] [--dry-run] [-F NAME]
-  fleet task list  [--quick] [-F NAME]
-  fleet task info  <name>           [-F NAME]
-  fleet task sync  <name>           [-F NAME]
-  fleet task end   <name> [--force] [-F NAME]
-  fleet task path  <name>           [-F NAME]   (used by `fleet open` in PS)
-  fleet fleets list
-  fleet fleets add     <name> [--root PATH] [--force]
-  fleet fleets default <name>
-  fleet fleets remove  <name>
+Subcommand registration is delegated to each command module via a
+``register(subparsers, fleet_arg)`` hook so this file stays small and
+imports stay shallow. Resolution order:
 
-`fleet open <name>` is handled in Fleet.psm1 because Python can't change the
-parent shell's CWD. If invoked here, a helpful error tells the user how to
-wire the PowerShell module.
+  1. Force UTF-8 on stdout/stderr (Windows consoles default to cp1252
+     when output is piped/captured, which blows up on the ⚠/✓/✗ glyphs).
+  2. Build the parser by calling each module's ``register()``.
+  3. Resolve the active fleet (``-F``/``--fleet`` override beats the
+     configured default) and pin it via :func:`fleet.state.set_active_fleet`.
+  4. Dispatch to the chosen handler.
+
+``fleet open`` is handled in ``Fleet.psm1`` because Python can't change
+the parent shell's CWD. If invoked here, a helpful error tells the user
+how to wire the PowerShell module.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import sys
 from pathlib import Path
 
-from fleet import registry, sync, tasks
-from fleet.config import (
-    FleetError,
-    active_fleet_name,
-    cyan,
-    dim,
-    gray,
-    green,
-    red,
-    set_active_fleet,
-    yellow,
-)
-from fleet.fleets_config import FleetsConfig, config_path
+from fleet import __version__, fleets_commands, repos_command, scan, sync, tasks
+from fleet.console import dim, red
+from fleet.errors import FleetError
+from fleet.fleets_config import FleetsConfig
+from fleet.state import active_fleet_name, set_active_fleet
 
 
 def _open_unsupported(_args: argparse.Namespace) -> int:
+    """Stub for ``fleet open`` / ``fleet task open``: Python can't cd the parent."""
     print(red(
         "ERROR: `fleet open` mutates the parent shell's working directory, "
         "so it can't run from the Python CLI."
     ), file=sys.stderr)
     if sys.platform == "win32":
-        psm1 = Path(__file__).resolve().parents[2] / "Fleet.psm1"
-        print(
-            "Wire the PowerShell module into your $PROFILE and restart pwsh:\n"
-            f"  Import-Module \"{psm1}\"",
-            file=sys.stderr,
-        )
+        # Best-effort hint when running from a source checkout. When installed
+        # via pip into site-packages, the path is misleading, so we omit it.
+        try:
+            psm1 = Path(__file__).resolve().parents[2] / "Fleet.psm1"
+            if psm1.is_file():
+                print(
+                    "Wire the PowerShell module into your $PROFILE and "
+                    f"restart pwsh:\n  Import-Module \"{psm1}\"",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    "Wire the Fleet.psm1 module from your fleet checkout into "
+                    "your $PROFILE.",
+                    file=sys.stderr,
+                )
+        except OSError:
+            print(
+                "Wire the Fleet.psm1 module from your fleet checkout into "
+                "your $PROFILE.",
+                file=sys.stderr,
+            )
     else:
         print(
             "From bash/zsh, run:\n"
@@ -62,73 +68,10 @@ def _open_unsupported(_args: argparse.Namespace) -> int:
     return 2
 
 
-# ---------------------------------------------------------------------------
-# `fleet fleets ...` handlers
-# ---------------------------------------------------------------------------
-
-def cmd_fleets_list(_args: argparse.Namespace) -> int:
-    cfg = FleetsConfig.load()
-    if not cfg.fleets:
-        print(yellow("No fleets configured."))
-        print(gray("  Add one with: fleet fleets add <name> [--root PATH]"))
-        return 0
-    print(cyan("Configured fleets:"))
-    name_w = max(len(n) for n in cfg.fleets)
-    for name in sorted(cfg.fleets):
-        entry = cfg.fleets[name]
-        marker = green("  (default)") if name == cfg.default else ""
-        scanned = (entry.root / "fleet.json").is_file()
-        status = "" if scanned else gray("  [not scanned]")
-        print(f"  {name.ljust(name_w)}  {entry.root}{status}{marker}")
-    print()
-    print(gray(f"Config file: {config_path()}"))
-    return 0
-
-
-def cmd_fleets_add(args: argparse.Namespace) -> int:
-    cfg = FleetsConfig.load()
-    root = Path(args.root) if args.root else Path.cwd()
-    cfg.add(args.name, root, force=args.force)
-    cfg.save()
-    print(green(f"✓ Registered fleet '{args.name}' at {cfg.fleets[args.name].root}"))
-    if cfg.default == args.name:
-        print(gray("  (set as default)"))
-    if not (cfg.fleets[args.name].root / "fleet.json").is_file():
-        print(gray(f"  Tip: run `fleet scan -F {args.name}` to populate fleet.json"))
-    return 0
-
-
-def cmd_fleets_default(args: argparse.Namespace) -> int:
-    cfg = FleetsConfig.load()
-    cfg.set_default(args.name)
-    cfg.save()
-    print(green(f"✓ Default fleet is now '{args.name}'"))
-    return 0
-
-
-def cmd_fleets_remove(args: argparse.Namespace) -> int:
-    cfg = FleetsConfig.load()
-    cfg.remove(args.name)
-    cfg.save()
-    print(green(f"✓ Unregistered fleet '{args.name}'"))
-    if cfg.default:
-        print(gray(f"  Default is now '{cfg.default}'."))
-    elif cfg.fleets:
-        print(gray("  No default set. Run `fleet fleets default <name>`."))
-    else:
-        print(gray("  No fleets remain. Add one with `fleet fleets add`."))
-    return 0
-
-
-# ---------------------------------------------------------------------------
-# Parser
-# ---------------------------------------------------------------------------
-
 def build_parser() -> argparse.ArgumentParser:
     # Common parent: the `--fleet`/`-F` override is attached to every
-    # fleet-aware subparser via `parents=[fleet_arg]`. Putting it here
-    # (rather than on the top-level parser) lets users type it AFTER the
-    # subcommand: `fleet sync -F work` works naturally.
+    # fleet-aware subparser. Putting it here (rather than on the top-level
+    # parser) lets users type it AFTER the subcommand: `fleet sync -F work`.
     fleet_arg = argparse.ArgumentParser(add_help=False)
     fleet_arg.add_argument(
         "--fleet", "-F", default=None, metavar="NAME",
@@ -139,144 +82,40 @@ def build_parser() -> argparse.ArgumentParser:
         prog="fleet",
         description="Multi-repo workspace tool: parallel git sync + task scaffolder.",
     )
-    sub = p.add_subparsers(dest="cmd", required=True, metavar="<command>")
+    p.add_argument("--version", action="version",
+                   version=f"%(prog)s {__version__}")
+    subparsers = p.add_subparsers(dest="cmd", required=True, metavar="<command>")
 
-    # --- fleet sync ---
-    s_sync = sub.add_parser(
-        "sync", parents=[fleet_arg],
-        help="parallel git pull --ff-only across every enabled repo",
-    )
-    s_sync.add_argument("--dry-run", action="store_true",
-                        help="preview changes without modifying repos")
-    s_sync.add_argument("--workers", type=int, default=sync.DEFAULT_WORKERS,
-                        help=f"number of parallel workers "
-                             f"(default {sync.DEFAULT_WORKERS}, 0 = auto, capped at 32)")
-    s_sync.add_argument("--no-auth-check", action="store_true",
-                        help="skip the per-host credential probe")
-    s_sync.set_defaults(func=sync.cmd_sync)
+    # Each module owns its own subparser registration.
+    sync.register(subparsers, fleet_arg)
+    scan.register(subparsers, fleet_arg)
+    repos_command.register(subparsers, fleet_arg)
+    tasks.register(subparsers, fleet_arg)
+    fleets_commands.register(subparsers, fleet_arg)
 
-    # --- fleet scan ---
-    s_scan = sub.add_parser(
-        "scan", parents=[fleet_arg],
-        help="rescan disk and rewrite fleet.json (preserves manual sync/exclude)",
-    )
-    s_scan.set_defaults(func=registry.cmd_scan)
-
-    # --- fleet repos ---
-    s_repos = sub.add_parser(
-        "repos", parents=[fleet_arg],
-        help="list every git repo under the active fleet's root",
-    )
-    s_repos.set_defaults(func=tasks.cmd_repos)
-
-    # --- fleet open (PS-only; stub here just to give a clear error) ---
-    s_open = sub.add_parser(
+    # `fleet open` and `fleet task open` are PS-only. Stub them here so the
+    # error message is a single concise line rather than argparse's
+    # "invalid choice" complaint.
+    s_open = subparsers.add_parser(
         "open",
         help="(PowerShell-only) cd into a task workspace and launch VS Code",
     )
     s_open.add_argument("name", nargs="?", help="task name")
     s_open.set_defaults(func=_open_unsupported)
 
-    # --- fleet task ---
-    s_task = sub.add_parser("task", help="manage task workspaces")
-    task_sub = s_task.add_subparsers(dest="task_cmd", required=True,
-                                     metavar="<command>")
-
-    # task new
-    s_new = task_sub.add_parser(
-        "new", parents=[fleet_arg],
-        help="create a new task workspace with worktrees per repo",
+    # Patch the `task` group in-place to add an `open` stub at the same
+    # level as `task new`/`list`/etc. This is purely so users get a helpful
+    # error rather than "invalid choice: 'open'".
+    task_action = next(
+        a for a in subparsers.choices["task"]._actions
+        if isinstance(a, argparse._SubParsersAction)
     )
-    s_new.add_argument("name", help="task name (folder + branch suffix)")
-    s_new.add_argument("--repos", required=True,
-                       help="comma-separated repo names "
-                            "(use group/path/name to disambiguate)")
-    s_new.add_argument("--description", "-d", default="",
-                       help="seed text for context.md")
-    s_new.add_argument("--no-pull", action="store_true",
-                       help="skip fetch + pull on each canonical repo "
-                            "(uses local refs only; offline-safe)")
-    s_new.add_argument("--dry-run", action="store_true",
-                       help="validate inputs and print the plan without "
-                            "creating anything")
-    s_new.set_defaults(func=tasks.cmd_new)
-
-    # task list
-    s_list = task_sub.add_parser(
-        "list", parents=[fleet_arg],
-        help="list active task workspaces in the active fleet",
-    )
-    s_list.add_argument("--quick", action="store_true",
-                        help="skip dirty/unpushed status checks")
-    s_list.set_defaults(func=tasks.cmd_list)
-
-    # task info
-    s_info = task_sub.add_parser(
-        "info", parents=[fleet_arg],
-        help="show detailed status of one task",
-    )
-    s_info.add_argument("name", help="task name")
-    s_info.set_defaults(func=tasks.cmd_info)
-
-    # task sync
-    s_tsync = task_sub.add_parser(
-        "sync", parents=[fleet_arg],
-        help="fetch + ff-pull each worktree on its task branch",
-    )
-    s_tsync.add_argument("name", help="task name")
-    s_tsync.set_defaults(func=tasks.cmd_sync)
-
-    # task end
-    s_end = task_sub.add_parser(
-        "end", parents=[fleet_arg],
-        help="archive and tear down a task workspace",
-    )
-    s_end.add_argument("name", help="task name")
-    s_end.add_argument("--force", action="store_true",
-                       help="proceed even if a worktree is dirty")
-    s_end.set_defaults(func=tasks.cmd_end)
-
-    # task path  (prints absolute workspace path; used by `fleet open`)
-    s_path = task_sub.add_parser(
-        "path", parents=[fleet_arg],
-        help="print the absolute path to a task workspace",
-    )
-    s_path.add_argument("name", help="task name")
-    s_path.set_defaults(func=tasks.cmd_path)
-
-    # task open (PS-only; stub for parity)
-    s_topen = task_sub.add_parser(
+    s_topen = task_action.add_parser(
         "open",
         help="(PowerShell-only) cd into a task workspace and launch VS Code",
     )
     s_topen.add_argument("name", nargs="?", help="task name")
     s_topen.set_defaults(func=_open_unsupported)
-
-    # --- fleet fleets ---
-    s_fleets = sub.add_parser("fleets", help="manage configured fleets")
-    fleets_sub = s_fleets.add_subparsers(dest="fleets_cmd", required=True,
-                                         metavar="<command>")
-
-    f_list = fleets_sub.add_parser("list", help="list all configured fleets")
-    f_list.set_defaults(func=cmd_fleets_list)
-
-    f_add = fleets_sub.add_parser("add", help="register a new fleet")
-    f_add.add_argument("name", help="fleet name")
-    f_add.add_argument("--root", default=None,
-                       help="repos root path (default: current directory)")
-    f_add.add_argument("--force", action="store_true",
-                       help="overwrite if the name is already registered")
-    f_add.set_defaults(func=cmd_fleets_add)
-
-    f_def = fleets_sub.add_parser("default",
-                                  help="set the default fleet")
-    f_def.add_argument("name", help="fleet name")
-    f_def.set_defaults(func=cmd_fleets_default)
-
-    f_rm = fleets_sub.add_parser("remove",
-                                 help="unregister a fleet (no file deletion)")
-    f_rm.add_argument("name", help="fleet name")
-    f_rm.set_defaults(func=cmd_fleets_remove)
 
     return p
 
@@ -284,26 +123,25 @@ def build_parser() -> argparse.ArgumentParser:
 def _needs_active_fleet(args: argparse.Namespace) -> bool:
     """True when the command requires the active fleet to be resolved.
 
-    `fleet fleets ...` and `fleet open` (and `fleet task open`) are excluded:
-    they manage config or shell state and don't read the registry directly.
+    ``fleet fleets ...`` and ``fleet open`` (and ``fleet task open``) are
+    excluded: they manage config or shell state and don't read the registry.
     """
     if args.cmd == "fleets":
         return False
     if args.cmd == "open":
         return False
-    if args.cmd == "task" and getattr(args, "task_cmd", None) == "open":
-        return False
-    return True
+    return not (args.cmd == "task" and getattr(args, "task_cmd", None) == "open")
 
 
 def main(argv: list[str] | None = None) -> int:
-    # Windows consoles default to cp1252 when output is piped/captured, which
-    # blows up on the ⚠/✓/✗ glyphs we use for status. Force UTF-8.
+    # Windows consoles default to cp1252 when output is piped/captured,
+    # which blows up on the ⚠/✓/✗ glyphs we use for status. Force UTF-8.
     for stream in (sys.stdout, sys.stderr):
-        try:
-            stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
-        except (AttributeError, OSError):
-            pass
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        with contextlib.suppress(OSError):
+            reconfigure(encoding="utf-8", errors="replace")
 
     parser = build_parser()
     args = parser.parse_args(argv)
