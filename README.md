@@ -40,7 +40,7 @@ dependencies** — Python stdlib + `git` is the entire stack.
 
 ```powershell
 # 1. Clone wherever you like
-git clone https://github.com/<you>/fleet.git $HOME\src\fleet
+git clone https://github.com/itabajah/fleet.git $HOME\src\fleet
 
 # 2. Wire the PowerShell module into your $PROFILE
 'Import-Module $HOME\src\fleet\Fleet.psm1' | Add-Content -Path $PROFILE
@@ -294,22 +294,3 @@ touches your shell state.
 | `<FLEET_CONFIG_PATH>`                    | Global named-fleets index                           |
 | `<FLEET_TASKS_ROOT>/<fleet>/<task>/`     | Active task workspace                               |
 | `<FLEET_TASKS_ROOT>/<fleet>/_archive/`   | Archived tasks (one zip per `task end`)             |
-
----
-
-## Contributing
-
-Pull requests welcome. The codebase is small (≈1.5 kLOC of Python),
-modular, and has zero runtime dependencies. New behavior should:
-
-- keep the no-deps property,
-- not block on git output that may stall (use timeouts in `git_ops`),
-- preserve hand-edited registry entries across `fleet scan`.
-
-Run the smoke test in [README — First-run walkthrough](#first-run-walkthrough)
-end-to-end against a temp directory before submitting.
-
-## License
-
-MIT. See [`pyproject.toml`](pyproject.toml). (Add a top-level `LICENSE`
-file with the standard MIT text before publishing.)
