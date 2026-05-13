@@ -1,5 +1,3 @@
-#requires -Version 7.0
-
 # Fleet.psm1 — PowerShell entry point for the `fleet` CLI.
 #
 # Most commands forward straight to `python -m fleet`. The exception is
@@ -16,8 +14,23 @@
 #
 # (e.g. Import-Module $HOME\src\fleet\Fleet.psm1)
 
-$script:FleetRoot = $PSScriptRoot
-$script:FleetSrc  = Join-Path $PSScriptRoot 'src'
+$script:FleetSrc = Join-Path $PSScriptRoot 'src'
+
+function Add-FleetSrcToPyPath {
+    # Prepend $script:FleetSrc to PYTHONPATH unless it's already there as a
+    # discrete entry. Component-aware so e.g. `…\src-experimental` doesn't
+    # false-match `…\src`.
+    $sep = [System.IO.Path]::PathSeparator
+    $existing = $env:PYTHONPATH
+    if ([string]::IsNullOrEmpty($existing)) {
+        $env:PYTHONPATH = $script:FleetSrc
+        return
+    }
+    foreach ($p in $existing.Split($sep)) {
+        if ($p -eq $script:FleetSrc) { return }
+    }
+    $env:PYTHONPATH = "$($script:FleetSrc)$sep$existing"
+}
 
 function fleet {
     [CmdletBinding(PositionalBinding = $false)]
@@ -51,12 +64,7 @@ function Invoke-FleetPython {
 
     $oldPyPath = $env:PYTHONPATH
     try {
-        if ([string]::IsNullOrEmpty($oldPyPath)) {
-            $env:PYTHONPATH = $script:FleetSrc
-        } elseif ($oldPyPath -notlike "*$($script:FleetSrc)*") {
-            $env:PYTHONPATH = "$($script:FleetSrc)$([System.IO.Path]::PathSeparator)$oldPyPath"
-        }
-
+        Add-FleetSrcToPyPath
         & python -m fleet @ArgList
         $global:LASTEXITCODE = $LASTEXITCODE
     }
@@ -65,21 +73,15 @@ function Invoke-FleetPython {
     }
 }
 
-function Invoke-FleetPython-Capture {
+function Invoke-FleetPythonCapture {
     # Like Invoke-FleetPython but captures stdout (returns it as an array of
     # strings) so callers can read structured output. Stderr passes through
-    # to the host. Used by `fleet open` to read the workspace path without
-    # the dim banner contaminating it.
+    # to the host. Used by `fleet open` to read the workspace path.
     param([string[]]$ArgList)
 
     $oldPyPath = $env:PYTHONPATH
     try {
-        if ([string]::IsNullOrEmpty($oldPyPath)) {
-            $env:PYTHONPATH = $script:FleetSrc
-        } elseif ($oldPyPath -notlike "*$($script:FleetSrc)*") {
-            $env:PYTHONPATH = "$($script:FleetSrc)$([System.IO.Path]::PathSeparator)$oldPyPath"
-        }
-
+        Add-FleetSrcToPyPath
         $stdout = & python -m fleet @ArgList
         $exitCode = $LASTEXITCODE
     }
@@ -105,22 +107,22 @@ function Invoke-FleetOpen {
     # Pass the entire remainder through to `task path` so -F / --fleet,
     # quoted args, etc. are handled by argparse exactly once.
     $pathArgs = @('task', 'path') + $Rest
-    $result = Invoke-FleetPython-Capture $pathArgs
+    $result = Invoke-FleetPythonCapture $pathArgs
 
     if ($result.ExitCode -ne 0) {
         $global:LASTEXITCODE = $result.ExitCode
         return
     }
 
-    # Output may include the dim "[fleet: ...]" banner when -F is used; the
-    # actual workspace path is the last non-empty line.
+    # `task path` writes only the workspace path to stdout; banners and
+    # other diagnostics go to stderr. Trim and use the first non-empty line.
     $lines = @($result.Stdout) | Where-Object { $_ -and $_.ToString().Trim() }
     if (-not $lines) {
         Write-Error 'fleet task path produced no output'
         $global:LASTEXITCODE = 1
         return
     }
-    $workspace = $lines[-1].ToString().Trim()
+    $workspace = $lines[0].ToString().Trim()
 
     if (-not (Test-Path -LiteralPath $workspace -PathType Container)) {
         Write-Error "Resolved workspace does not exist: $workspace"

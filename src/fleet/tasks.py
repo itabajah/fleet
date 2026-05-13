@@ -34,7 +34,7 @@ import re
 import shutil
 import sys
 import zipfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fleet import git_ops
@@ -51,7 +51,10 @@ from fleet.config import (
 )
 from fleet.discovery import RepoInfo, discover_repos
 
-# Filesystem-safe AND valid as a git branch name suffix.
+# Filesystem-safe AND valid as a git branch name suffix. The regex enforces
+# the character set; `_validate_task_name` additionally rules out the
+# git-ref-format edge cases the regex can't express (`..`, leading/trailing
+# `.`, `.lock` suffix, `@{`).
 _TASK_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-]{0,63}$")
 
 
@@ -99,6 +102,17 @@ def _validate_task_name(name: str) -> None:
             f"Invalid task name '{name}'. "
             "Use letters, digits, '.', '_', '-' (1-64 chars, must start "
             "with a letter or digit)."
+        )
+    # git ref rules the regex can't express. We don't need to invoke git for
+    # these — they're cheap to check ourselves and let us fail before any
+    # filesystem mutation.
+    if (".." in name
+            or name.startswith(".") or name.endswith(".")
+            or name.endswith(".lock") or "@{" in name):
+        raise FleetError(
+            f"Invalid task name '{name}'. Git would refuse the resulting "
+            "branch (no '..', no leading/trailing '.', no '.lock' suffix, "
+            "no '@{')."
         )
 
 
@@ -179,13 +193,40 @@ def _resolve_repo(token: str, all_repos: list[RepoInfo]) -> RepoInfo:
     return chosen
 
 
+def _manifest_repo_paths(entry: dict) -> tuple[Path, Path]:
+    """Return (worktree_path, canonical_path) from a manifest repo entry.
+
+    Centralises the `.get` defaulting so a partially-written manifest can
+    never raise `KeyError` deep inside `cmd_end` / `cmd_sync` / `cmd_info`.
+    """
+    return (
+        Path(entry.get("worktree_path", "")),
+        Path(entry.get("canonical_path", "")),
+    )
+
+
+def _now_iso() -> str:
+    """Timezone-aware ISO-8601 timestamp for manifest fields."""
+    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
 # ---------------------------------------------------------------------------
 # Per-repo task setup helpers
 # ---------------------------------------------------------------------------
 
 def _prepare_canonical(repo: RepoInfo, no_pull: bool) -> str:
-    """Fetch (and FF-pull when safe) the canonical repo. Return default branch."""
+    """Fetch (and FF-pull when safe) the canonical repo. Return default branch.
+
+    With ``no_pull=True`` we skip both the network fetch and the local pull,
+    and use the offline-only default-branch detector so we don't surprise the
+    user with a hidden network round-trip.
+    """
     label = f"[{repo.name}]"
+
+    if no_pull:
+        default = git_ops.detect_default_branch(repo.path, offline=True)
+        print(f"  {label} default branch: {default} (skipping fetch + pull)")
+        return default
 
     print(f"  {label} fetching...")
     fetch = git_ops.fetch_prune(repo.path)
@@ -194,10 +235,6 @@ def _prepare_canonical(repo: RepoInfo, no_pull: bool) -> str:
               f"    (continuing with whatever origin/* is cached)")
 
     default = git_ops.detect_default_branch(repo.path)
-
-    if no_pull:
-        print(f"  {label} default branch: {default} (skipping local pull)")
-        return default
 
     if git_ops.is_dirty(repo.path):
         print(f"  {label} canonical has local changes; "
@@ -220,6 +257,10 @@ def _prepare_canonical(repo: RepoInfo, no_pull: bool) -> str:
                               cwd=repo.path, check=False)
         if upd.ok:
             print(f"  {label} updated local {default} from origin")
+        else:
+            print(f"  {label} WARN: could not fast-forward local {default}:\n"
+                  f"    {upd.stderr.strip()}\n"
+                  f"    (worktree will branch from origin/{default})")
     return default
 
 
@@ -260,8 +301,15 @@ def _add_worktree(repo: RepoInfo, task_name: str, default_branch: str,
             f"with `git -C \"{repo.path}\" push origin --delete {branch}`."
         )
 
+    # `--no-track` is critical: without it, branching from `origin/<default>`
+    # silently sets the new branch's upstream to `origin/<default>`. That
+    # means the first plain `git push` either errors confusingly (push.default
+    # = simple) or, worse, pushes to the default branch on origin
+    # (push.default = upstream). With `--no-track`, the branch has no upstream
+    # and the user must explicitly `git push -u origin <branch>` the first
+    # time — which is what we want.
     git_ops.run_git(
-        "worktree", "add", str(wt_path),
+        "worktree", "add", "--no-track", str(wt_path),
         "-b", branch, f"origin/{default_branch}",
         cwd=repo.path,
     )
@@ -277,8 +325,7 @@ def cmd_repos(_args: argparse.Namespace) -> int:
     """List every repo on disk, grouped by parent path, with disabled markers."""
     repos = discover_repos()
     if not repos:
-        print("No git repos found under the configured Repos root.",
-              file=sys.stderr)
+        print("No git repos found under the configured Repos root.")
         return 0
 
     by_group: dict[str, list[RepoInfo]] = {}
@@ -454,8 +501,7 @@ def cmd_info(args: argparse.Namespace) -> int:
         name_str = r.get("name", "?")
         group = r.get("group")
         loc = f"{group}/{name_str}" if group else name_str
-        wt = Path(r.get("worktree_path", ""))
-        canonical = r.get("canonical_path", "?")
+        wt, canonical = _manifest_repo_paths(r)
         print(f"  - {loc}")
         print(f"      canonical: {canonical}")
         print(f"      worktree:  {wt}")
@@ -549,6 +595,12 @@ def cmd_new(args: argparse.Namespace) -> int:
         print(f"  + {workspace / 'task.json'}")
         return 0
 
+    # Compute the branch name (and resolve the active fleet) BEFORE any
+    # filesystem mutation so a misconfiguration doesn't leave behind an
+    # empty workspace dir.
+    branch = _task_branch(name)
+    description = args.description
+
     # workspace.mkdir(parents=True) creates the per-fleet TASKS_ROOT/<fleet>
     # directory if missing; no separate mkdir needed.
     workspace.mkdir(parents=True, exist_ok=False)
@@ -559,11 +611,46 @@ def cmd_new(args: argparse.Namespace) -> int:
             default = _prepare_canonical(repo, no_pull=args.no_pull)
             wt = _add_worktree(repo, name, default, workspace)
             created_worktrees.append((repo, wt))
+
+        context_md = workspace / "context.md"
+        context_md.write_text(
+            f"# {name}\n\n"
+            f"_Branch:_ `{branch}`\n"
+            f"_Created:_ {_now_iso()}\n\n"
+            f"## Description\n\n{description}\n\n"
+            f"## Repos\n\n"
+            + "\n".join(
+                f"- `{r.name}`"
+                + (f"  _(group: {r.group_path})_" if r.group_path else "")
+                for r in chosen
+            )
+            + "\n\n## Notes\n\n"
+            "_Use this file to capture acceptance criteria, decisions, links._\n",
+            encoding="utf-8",
+        )
+        (workspace / "scratch").mkdir(exist_ok=True)
+
+        manifest = {
+            "name": name,
+            "branch": branch,
+            "created_at": _now_iso(),
+            "description": description,
+            "repos": [
+                {
+                    "name": r.name,
+                    "group": r.group_path or None,
+                    "canonical_path": str(r.path),
+                    "worktree_path": str(workspace / r.name),
+                }
+                for r in chosen
+            ],
+        }
+        save_manifest(workspace, manifest)
     except BaseException:
         # Catch BaseException so Ctrl-C also triggers rollback.
         print("\nERROR during scaffolding — rolling back created worktrees...",
               file=sys.stderr)
-        rollback_branch = _task_branch(name)
+        rollback_branch = branch
         for repo, wt in created_worktrees:
             git_ops.run_git("worktree", "remove", "--force", str(wt),
                             cwd=repo.path, check=False)
@@ -574,43 +661,6 @@ def cmd_new(args: argparse.Namespace) -> int:
         except Exception:
             pass
         raise
-
-    branch = _task_branch(name)
-    description = args.description or ""
-    context_md = workspace / "context.md"
-    context_md.write_text(
-        f"# {name}\n\n"
-        f"_Branch:_ `{branch}`\n"
-        f"_Created:_ {datetime.now().isoformat(timespec='seconds')}\n\n"
-        f"## Description\n\n{description}\n\n"
-        f"## Repos\n\n"
-        + "\n".join(
-            f"- `{r.name}`"
-            + (f"  _(group: {r.group_path})_" if r.group_path else "")
-            for r in chosen
-        )
-        + "\n\n## Notes\n\n"
-        "_Use this file to capture acceptance criteria, decisions, links._\n",
-        encoding="utf-8",
-    )
-    (workspace / "scratch").mkdir(exist_ok=True)
-
-    manifest = {
-        "name": name,
-        "branch": branch,
-        "created_at": datetime.now().isoformat(timespec="seconds"),
-        "description": description,
-        "repos": [
-            {
-                "name": r.name,
-                "group": r.group_path or None,
-                "canonical_path": str(r.path),
-                "worktree_path": str(workspace / r.name),
-            }
-            for r in chosen
-        ],
-    }
-    save_manifest(workspace, manifest)
 
     print(f"\nTask ready: {workspace}")
     print(f"Next: fleet open {name}")
@@ -642,21 +692,23 @@ def cmd_end(args: argparse.Namespace) -> int:
     unpushed_warnings: list[str] = []
     live_worktrees: list[dict] = []
     for r in repos_in_manifest:
-        wt = Path(r["worktree_path"])
+        if not isinstance(r, dict):
+            continue
+        wt, _ = _manifest_repo_paths(r)
         if not wt.is_dir():
-            print(f"note: worktree '{r['name']}' already gone ({wt})")
+            print(f"note: worktree '{r.get('name', '?')}' already gone ({wt})")
             continue
         live_worktrees.append(r)
         if git_ops.is_dirty(wt):
-            dirty.append(r["name"])
+            dirty.append(r.get("name", "?"))
         n = git_ops.unpushed_count(wt, branch)
         if n is None:
             unpushed_warnings.append(
-                f"  {r['name']}: branch '{branch}' was never pushed"
+                f"  {r.get('name', '?')}: branch '{branch}' was never pushed"
             )
         elif n > 0:
             unpushed_warnings.append(
-                f"  {r['name']}: {n} unpushed commit(s) on '{branch}'"
+                f"  {r.get('name', '?')}: {n} unpushed commit(s) on '{branch}'"
             )
 
     if dirty and not args.force:
@@ -704,26 +756,28 @@ def cmd_end(args: argparse.Namespace) -> int:
 
     failures: list[str] = []
     for r in live_worktrees:
-        wt = Path(r["worktree_path"])
-        cwd = Path(r["canonical_path"])
+        wt, cwd = _manifest_repo_paths(r)
         flag = ["--force"] if args.force else []
         proc = git_ops.run_git("worktree", "remove", *flag, str(wt),
                                cwd=cwd, check=False)
         if not proc.ok:
-            failures.append(f"  {r['name']}: {proc.stderr.strip()}")
+            failures.append(f"  {r.get('name', '?')}: {proc.stderr.strip()}")
         else:
-            print(f"  removed worktree {r['name']}")
+            print(f"  removed worktree {r.get('name', '?')}")
 
     for r in repos_in_manifest:
-        git_ops.run_git("worktree", "prune",
-                        cwd=Path(r["canonical_path"]), check=False)
+        if not isinstance(r, dict):
+            continue
+        _, cwd = _manifest_repo_paths(r)
+        if cwd.is_dir():
+            git_ops.run_git("worktree", "prune", cwd=cwd, check=False)
 
     if failures:
         print("\nWARN: some worktrees could not be removed:", file=sys.stderr)
         for line in failures:
             print(line, file=sys.stderr)
-        print("\nFix those manually, then `Remove-Item -Recurse -Force "
-              f"{workspace}` to finish cleanup.", file=sys.stderr)
+        print(f"\nFix those manually, then delete the workspace folder:\n"
+              f"  {workspace}", file=sys.stderr)
         return 2
 
     try:
@@ -763,10 +817,17 @@ def cmd_sync(args: argparse.Namespace) -> int:
     print(f"Syncing task '{name}' (branch {branch}):")
     any_failure = False
     for r in repos_in_manifest:
-        wt = Path(r["worktree_path"])
-        label = f"  [{r['name']}]"
+        if not isinstance(r, dict):
+            continue
+        wt, _ = _manifest_repo_paths(r)
+        label = f"  [{r.get('name', '?')}]"
         if not wt.is_dir():
             print(f"{label} worktree missing on disk; skipping")
+            any_failure = True
+            continue
+        if git_ops.is_dirty(wt):
+            print(f"{label} uncommitted changes; skipping pull "
+                  f"(commit/stash, then re-run)")
             any_failure = True
             continue
 

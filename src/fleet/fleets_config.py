@@ -125,6 +125,16 @@ class FleetsConfig:
                 f"Invalid fleet name '{name}'. Must start with a letter/digit "
                 "and contain only A-Z, a-z, 0-9, '.', '_', '-' (max 32 chars)."
             )
+        # The name appears as a component of `task/<fleet>/<task>` git refs.
+        # Rule out the same git-ref edge cases _validate_task_name covers.
+        if (".." in name
+                or name.startswith(".") or name.endswith(".")
+                or name.endswith(".lock") or "@{" in name):
+            raise FleetError(
+                f"Invalid fleet name '{name}': would produce an invalid git "
+                "ref (no '..', no leading/trailing '.', no '.lock' suffix, "
+                "no '@{')."
+            )
         if name in self.fleets and not force:
             raise FleetError(
                 f"Fleet '{name}' already registered "

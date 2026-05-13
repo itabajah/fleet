@@ -27,16 +27,16 @@ import argparse
 import json
 import os
 import re
-import sys
 from pathlib import Path
 
 from fleet.config import (
-    FleetError,
+    PRUNE_DIRS,
     REGISTRY_FILENAME,
     ROOT_META_KEYS,
     TOOL_HOME_DIRNAME,
     cyan,
     find_repos_root,
+    fleet_install_dir,
     gray,
     green,
     load_registry,
@@ -145,13 +145,18 @@ def _get_or_create(parent: dict, name: str, existing_node: dict | None) -> dict:
 
 
 def _walk_git_dirs(root: Path):
-    """Yield directories under `root` that contain a `.git` entry. Skips ..me."""
-    # Match sync.ps1 `Get-ChildItem -Recurse -Filter .git -Force` semantics
-    # (find every .git directory under root). We additionally prune obvious
-    # heavy build dirs to keep scans fast.
-    prune = {"node_modules", "__pycache__", ".venv", "venv", ".tox",
-             ".mypy_cache", ".pytest_cache", ".next", ".turbo",
-             "dist", "build", "target", "bin", "obj", TOOL_HOME_DIRNAME}
+    """Yield directories under `root` that contain a `.git` entry. Skips ..me.
+
+    Detects both normal repos (`.git/` directory) and git worktrees (`.git`
+    file containing `gitdir: …`). Symlink/junction loops are avoided by
+    deduping resolved paths; the fleet checkout itself is also pruned.
+    """
+    prune = PRUNE_DIRS | {TOOL_HOME_DIRNAME}
+    try:
+        skip = fleet_install_dir().resolve()
+    except OSError:
+        skip = None
+    seen: set = set()
     stack: list[Path] = [root]
     while stack:
         cur = stack.pop()
@@ -161,18 +166,29 @@ def _walk_git_dirs(root: Path):
         except OSError:
             continue
         for entry in entries:
+            # `.git` may be a directory (normal repo) or a file (worktree).
+            # Either way, the parent is the repo we want to yield.
+            if entry.name == ".git":
+                yield cur
+                continue
             try:
                 if not entry.is_dir(follow_symlinks=False):
                     continue
             except OSError:
                 continue
-            if entry.name == ".git":
-                # Found a repo: yield its parent directory.
-                yield cur
-                continue
             if entry.name in prune:
                 continue
-            stack.append(Path(entry.path))
+            p = Path(entry.path)
+            try:
+                real = p.resolve()
+            except OSError:
+                continue
+            if skip is not None and real == skip:
+                continue
+            if real in seen:
+                continue
+            seen.add(real)
+            stack.append(p)
 
 
 def _build_structure(scan_root: Path, expanded_existing: dict) -> tuple[dict, int, int]:

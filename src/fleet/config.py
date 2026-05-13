@@ -9,6 +9,26 @@ from pathlib import Path
 
 REGISTRY_FILENAME = "fleet.json"
 
+# Names to skip when walking a fleet root for git repos. Both `discovery`
+# and `registry` use this so the two walkers can never disagree about which
+# directories were considered.
+PRUNE_DIRS = frozenset({
+    "node_modules",
+    "__pycache__",
+    ".venv",
+    "venv",
+    ".tox",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".next",
+    ".turbo",
+    "dist",
+    "build",
+    "target",
+    "bin",
+    "obj",
+})
+
 
 def _default_tasks_root() -> Path:
     """Pick a reasonable per-platform default for the tasks root.
@@ -25,9 +45,19 @@ TASKS_ROOT = Path(os.environ.get("FLEET_TASKS_ROOT") or _default_tasks_root())
 # Top-level keys in fleet.json that aren't folder nodes.
 ROOT_META_KEYS = frozenset({"root"})
 
-# Subtree under REPOS_ROOT that holds fleet itself; never offered as a
-# task target and never synced even if the user re-enables ..me later.
+# Local convention: the directory holding fleet's own clone is named with
+# a leading-dot prefix (e.g. `..me`) so it sorts to the top in dir listings.
+# It's both pruned during scans and force-disabled in fleet.json.
 TOOL_HOME_DIRNAME = "..me"
+
+
+def fleet_install_dir() -> Path:
+    """Absolute path to the directory holding this fleet checkout.
+
+    Resolved from ``__file__`` so we can prune fleet's own source tree from
+    every disk walk regardless of where the user cloned it.
+    """
+    return Path(__file__).resolve().parents[2]
 
 
 class FleetError(Exception):
@@ -54,8 +84,16 @@ def set_active_fleet(name: str, root: Path) -> None:
     Called by ``cli.main()`` after resolving ``--fleet``/``-F`` against the
     global fleets config. All further calls to ``find_repos_root()`` /
     ``active_fleet_name()`` return these values.
+
+    Raises ``FleetError`` if the recorded root no longer exists on disk
+    (deleted/renamed since `fleet fleets add`).
     """
     global _repos_root, _active_fleet_name
+    if not root.is_dir():
+        raise FleetError(
+            f"Fleet '{name}' root no longer exists at {root}.\n"
+            f"  Re-add with: fleet fleets add {name} --root <new-path> --force"
+        )
     _repos_root = root.resolve()
     _active_fleet_name = name
 

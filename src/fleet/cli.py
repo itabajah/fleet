@@ -43,17 +43,22 @@ from fleet.fleets_config import FleetsConfig, config_path
 
 def _open_unsupported(_args: argparse.Namespace) -> int:
     print(red(
-        "ERROR: `fleet open` only works through the Fleet.psm1 PowerShell module "
-        "(it must change the parent shell's working directory)."
+        "ERROR: `fleet open` mutates the parent shell's working directory, "
+        "so it can't run from the Python CLI."
     ), file=sys.stderr)
-    # Resolve the on-disk Fleet.psm1 next to this package so the hint is
-    # always correct regardless of where fleet has been installed.
-    psm1 = Path(__file__).resolve().parents[2] / "Fleet.psm1"
-    print(
-        "Add the following to your $PROFILE and restart the shell:\n"
-        f"  Import-Module \"{psm1}\"",
-        file=sys.stderr,
-    )
+    if sys.platform == "win32":
+        psm1 = Path(__file__).resolve().parents[2] / "Fleet.psm1"
+        print(
+            "Wire the PowerShell module into your $PROFILE and restart pwsh:\n"
+            f"  Import-Module \"{psm1}\"",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            "From bash/zsh, run:\n"
+            "  cd \"$(fleet task path <name>)\" && code .",
+            file=sys.stderr,
+        )
     return 2
 
 
@@ -144,7 +149,8 @@ def build_parser() -> argparse.ArgumentParser:
     s_sync.add_argument("--dry-run", action="store_true",
                         help="preview changes without modifying repos")
     s_sync.add_argument("--workers", type=int, default=sync.DEFAULT_WORKERS,
-                        help="number of parallel workers (0 = auto, capped at 32)")
+                        help=f"number of parallel workers "
+                             f"(default {sync.DEFAULT_WORKERS}, 0 = auto, capped at 32)")
     s_sync.add_argument("--no-auth-check", action="store_true",
                         help="skip the per-host credential probe")
     s_sync.set_defaults(func=sync.cmd_sync)
@@ -188,7 +194,8 @@ def build_parser() -> argparse.ArgumentParser:
     s_new.add_argument("--description", "-d", default="",
                        help="seed text for context.md")
     s_new.add_argument("--no-pull", action="store_true",
-                       help="skip the `git pull` step on each canonical repo")
+                       help="skip fetch + pull on each canonical repo "
+                            "(uses local refs only; offline-safe)")
     s_new.add_argument("--dry-run", action="store_true",
                        help="validate inputs and print the plan without "
                             "creating anything")
@@ -197,7 +204,7 @@ def build_parser() -> argparse.ArgumentParser:
     # task list
     s_list = task_sub.add_parser(
         "list", parents=[fleet_arg],
-        help="list active task workspaces under C:\\Tasks\\",
+        help="list active task workspaces in the active fleet",
     )
     s_list.add_argument("--quick", action="store_true",
                         help="skip dirty/unpushed status checks")
@@ -311,9 +318,12 @@ def main(argv: list[str] | None = None) -> int:
             return e.exit_code
 
         # Show a quiet banner only when overriding via -F so default usage
-        # stays uncluttered.
+        # stays uncluttered. Goes to stderr so callers that capture stdout
+        # (Fleet.psm1's `task path` reader, shell `$(…)` substitution) get
+        # clean output.
         if getattr(args, "fleet", None):
-            print(dim(f"[fleet: {active_fleet_name()}  →  {entry.root}]"))
+            print(dim(f"[fleet: {active_fleet_name()}  →  {entry.root}]"),
+                  file=sys.stderr)
 
     try:
         return args.func(args)

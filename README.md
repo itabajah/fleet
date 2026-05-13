@@ -60,7 +60,7 @@ PS module](#without-the-powershell-module) below.)
 | ------------- | ----------------------------------------------------------------- |
 | Python        | ≥ 3.10                                                            |
 | `git`         | any modern version (must support `git worktree`)                  |
-| PowerShell    | ≥ 7.0 — only required for `fleet open`                            |
+| PowerShell    | any modern version (only needed for `Fleet.psm1` and `fleet open`) |
 | `code`        | optional — used by `fleet open` to launch VS Code on the workspace |
 
 ---
@@ -109,7 +109,7 @@ That's the entire happy path.
 | `fleet scan`                                 | Walk disk, rewrite `fleet.json`, preserve manual settings                 |
 | `fleet repos`                                | List every git repo on disk; mark disabled / not-in-registry              |
 | `fleet task new <name> --repos a,b[,grp/c]`  | Create a task workspace with worktrees                                    |
-| `fleet task list`                            | List active task workspaces in the active fleet                           |
+| `fleet task list [--quick]`                  | List active task workspaces (`--quick` skips dirty/unpushed checks)       |
 | `fleet task info <name>`                     | Detailed status of one task                                               |
 | `fleet task sync <name>`                     | Fetch + ff-pull each worktree on its task branch                          |
 | `fleet task end <name> [--force]`            | Archive `task.json`/`context.md`/`scratch/`, tear down worktrees          |

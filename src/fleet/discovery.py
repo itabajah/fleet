@@ -29,32 +29,17 @@ from pathlib import Path
 from typing import Iterator
 
 from fleet.config import (
+    PRUNE_DIRS,
     ROOT_META_KEYS,
     TOOL_HOME_DIRNAME,
+    fleet_install_dir,
     load_registry,
     sync_root,
 )
 
 # Names to skip during disk walk. `.git` is internal git state; the rest are
 # common heavy build/dependency dirs that can't contain a managed repo.
-_PRUNE_DIRS = frozenset({
-    ".git",
-    "node_modules",
-    "__pycache__",
-    ".venv",
-    "venv",
-    ".tox",
-    ".mypy_cache",
-    ".pytest_cache",
-    ".next",
-    ".turbo",
-    "dist",
-    "build",
-    "target",
-    "bin",
-    "obj",
-    TOOL_HOME_DIRNAME,
-})
+_PRUNE_DIRS = PRUNE_DIRS | {".git", TOOL_HOME_DIRNAME}
 
 
 @dataclass(frozen=True)
@@ -85,16 +70,27 @@ class RepoInfo:
 # ---------------------------------------------------------------------------
 
 def _looks_like_git_repo(p: Path) -> bool:
+    # `.git` is a directory in normal repos but a regular file in worktrees
+    # (containing `gitdir: …`). `exists()` matches both.
     return (p / ".git").exists()
 
 
-def _walk_repos(root: Path) -> Iterator[Path]:
+def _walk_repos(root: Path, _seen: set | None = None,
+                _skip: Path | None = None) -> Iterator[Path]:
     """Yield every directory under `root` that contains a `.git` entry.
 
     Always recurses into found repos because the convention here is to clone
     sibling repos under a repo's `temp/` subdirectory (see fleet.json's
-    `Infra.K8s.Clusters/temp` etc.). Skips obvious heavy dirs.
+    `Infra.K8s.Clusters/temp` etc.). Skips obvious heavy dirs and dedupes by
+    resolved path so symlink/junction loops can't crash the walk.
     """
+    if _seen is None:
+        _seen = set()
+    if _skip is None:
+        try:
+            _skip = fleet_install_dir().resolve()
+        except OSError:
+            _skip = None
     try:
         with os.scandir(root) as it:
             entries = list(it)
@@ -109,9 +105,18 @@ def _walk_repos(root: Path) -> Iterator[Path]:
         if entry.name in _PRUNE_DIRS:
             continue
         p = Path(entry.path)
+        try:
+            real = p.resolve()
+        except OSError:
+            continue
+        if _skip is not None and real == _skip:
+            continue
+        if real in _seen:
+            continue
+        _seen.add(real)
         if _looks_like_git_repo(p):
             yield p
-        yield from _walk_repos(p)
+        yield from _walk_repos(p, _seen, _skip)
 
 
 # ---------------------------------------------------------------------------

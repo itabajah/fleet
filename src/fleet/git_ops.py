@@ -118,10 +118,14 @@ def is_git_repo(path: Path) -> bool:
 def is_dirty(repo_path: Path) -> bool:
     """True if the working tree has uncommitted changes.
 
-    Returns False on git failure so a single broken worktree doesn't abort
-    aggregate operations like `fleet task list`.
+    Returns False on any git failure (or if `repo_path` has vanished) so a
+    single broken worktree doesn't abort aggregate operations like
+    `fleet task list`.
     """
-    r = run_git("status", "--porcelain", cwd=repo_path, check=False)
+    try:
+        r = run_git("status", "--porcelain", cwd=repo_path, check=False)
+    except FleetError:
+        return False
     if r.returncode != 0:
         return False
     return bool(r.stdout.strip())
@@ -145,7 +149,7 @@ def origin_url(repo_path: Path) -> str | None:
 
 
 def origin_host(remote_url: str) -> str:
-    """Extract the host portion from an origin URL.
+    """Extract the host portion (lowercased) from an origin URL.
 
     Handles https://host/..., git@host:..., and ssh://git@host/... formats.
     Falls back to the raw URL when nothing matches (so callers still get a
@@ -153,19 +157,23 @@ def origin_host(remote_url: str) -> str:
     """
     m = re.match(r"^[a-z][a-z0-9+.\-]*://(?:[^/@]+@)?([^/:]+)", remote_url)
     if m:
-        return m.group(1)
+        return m.group(1).lower()
     m = re.match(r"^[^@]+@([^:]+):", remote_url)
     if m:
-        return m.group(1)
-    return remote_url
+        return m.group(1).lower()
+    return remote_url.lower()
 
 
-def detect_default_branch(repo_path: Path) -> str:
+def detect_default_branch(repo_path: Path, *, offline: bool = False) -> str:
     """Return origin's default branch (e.g. 'main').
 
-    Tries symbolic-ref first; if that fails, refreshes origin/HEAD via
-    `remote set-head origin --auto`; as a last resort, probes for main/master.
+    Tries symbolic-ref first; if that fails and ``offline`` is False,
+    refreshes origin/HEAD via ``git remote set-head origin --auto``; as a
+    last resort, probes for ``main`` then ``master`` from local refs.
     Raises FleetError if nothing works.
+
+    Pass ``offline=True`` from code paths that promised the user no network
+    activity (e.g. ``--no-pull``).
     """
     r = run_git("symbolic-ref", "--quiet", "--short",
                 "refs/remotes/origin/HEAD", cwd=repo_path, check=False)
@@ -174,15 +182,16 @@ def detect_default_branch(repo_path: Path) -> str:
         if ref.startswith("origin/"):
             return ref[len("origin/"):]
 
-    refresh = run_git("remote", "set-head", "origin", "--auto",
-                      cwd=repo_path, check=False)
-    if refresh.returncode == 0:
-        r = run_git("symbolic-ref", "--quiet", "--short",
-                    "refs/remotes/origin/HEAD", cwd=repo_path, check=False)
-        if r.returncode == 0:
-            ref = r.stdout.strip()
-            if ref.startswith("origin/"):
-                return ref[len("origin/"):]
+    if not offline:
+        refresh = run_git("remote", "set-head", "origin", "--auto",
+                          cwd=repo_path, check=False)
+        if refresh.returncode == 0:
+            r = run_git("symbolic-ref", "--quiet", "--short",
+                        "refs/remotes/origin/HEAD", cwd=repo_path, check=False)
+            if r.returncode == 0:
+                ref = r.stdout.strip()
+                if ref.startswith("origin/"):
+                    return ref[len("origin/"):]
 
     for candidate in ("main", "master"):
         probe = run_git("show-ref", "--verify", "--quiet",
@@ -191,6 +200,12 @@ def detect_default_branch(repo_path: Path) -> str:
         if probe.returncode == 0:
             return candidate
 
+    if offline:
+        raise FleetError(
+            f"Could not determine default branch for {repo_path} from local "
+            "refs. Drop --no-pull (or run `git fetch && git remote set-head "
+            "origin --auto` in that repo) and try again."
+        )
     raise FleetError(
         f"Could not determine default branch for {repo_path}. "
         "Try `git remote set-head origin --auto` in that repo."
