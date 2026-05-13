@@ -410,8 +410,10 @@ def cmd_sync(args: argparse.Namespace) -> int:
         print()
 
     if counts["Failed"] > 0:
+        # Match the partial-failure exit code used by `fleet task sync`
+        # (and FleetError's documented convention).
         print(yellow("⚠ Completed with errors"))
-        return 1
+        return 2
     if counts["Success"] == 0 and counts["DryRun"] == 0:
         print(yellow("⚠ No repositories were updated"))
         return 0

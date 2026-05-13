@@ -104,7 +104,7 @@ That's the entire happy path.
 | -------------------------------------------- | ------------------------------------------------------------------------ |
 | `fleet sync`                                 | Parallel `git pull --ff-only` across every enabled repo                   |
 | `fleet sync --dry-run`                       | Preview what sync would do                                                |
-| `fleet sync --workers N`                     | Worker count (default 10, `0` = auto, hard cap 32)                        |
+| `fleet sync --workers N`                     | Worker count (default 10, `0` = auto: one per repo, capped at 32)        |
 | `fleet sync --no-auth-check`                 | Skip the per-host credential probe                                        |
 | `fleet scan`                                 | Walk disk, rewrite `fleet.json`, preserve manual settings                 |
 | `fleet repos`                                | List every git repo on disk; mark disabled / not-in-registry              |
@@ -187,6 +187,9 @@ scan handles both forms on read and emits the collapsed form on write.
 Task workspaces live at `<TASKS_ROOT>/<fleet>/<task>/`. Default
 `TASKS_ROOT` is `C:\Tasks` on Windows and `~/fleet-tasks` elsewhere;
 override at any time with the `FLEET_TASKS_ROOT` environment variable.
+Note that `C:\Tasks` requires write access to the drive root — if your
+account can't write there, set `FLEET_TASKS_ROOT` to e.g.
+`%LOCALAPPDATA%\fleet-tasks` before the first `fleet task new`.
 
 Each task gets:
 
@@ -247,14 +250,21 @@ fleet/
 └── src/fleet/
     ├── __init__.py
     ├── __main__.py            # `python -m fleet`
-    ├── cli.py                 # argparse top-level
-    ├── config.py              # paths, FleetError, color helpers
+    ├── cli.py                 # argparse top-level + dispatch
+    ├── console.py             # ANSI color helpers
     ├── discovery.py           # walks disk + applies fleet.json rules
+    ├── errors.py              # FleetError (carries exit code)
+    ├── fleets_commands.py     # `fleet fleets ...` handlers
     ├── fleets_config.py       # named-fleet registry (LOCALAPPDATA / XDG)
-    ├── git_ops.py             # unified git wrappers (run_git, fetch, pull, …)
-    ├── registry.py            # `fleet scan` (write path)
+    ├── git_ops.py             # unified git wrappers (run_git, fetch, pull, ...)
+    ├── paths.py               # filesystem constants (PRUNE_DIRS, defaults)
+    ├── registry_tree.py       # fleet.json normalization + traversal
+    ├── repos_command.py       # `fleet repos`
+    ├── scan.py                # `fleet scan` (write path)
+    ├── state.py               # active-fleet state + derived paths
     ├── sync.py                # `fleet sync` (parallel runner)
-    └── tasks.py               # `fleet task *` and `fleet repos`
+    ├── walker.py              # shared disk walker
+    └── tasks/                 # `fleet task ...` (manifest, lifecycle, inspect, validation)
 ```
 
 ---
@@ -273,6 +283,8 @@ Every command works exactly the same. The only thing you lose is
 
 ```bash
 cd "$(fleet task path <name>)" && code .
+# Non-default fleet:
+cd "$(fleet task path <name> -F work)" && code .
 ```
 
 For zsh/bash, you can wrap that in a function. The Python CLI never

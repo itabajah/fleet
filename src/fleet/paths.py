@@ -12,9 +12,8 @@ from pathlib import Path
 
 REGISTRY_FILENAME = "fleet.json"
 
-# Directory names skipped during disk walks. Both the discovery and scan
-# walkers consult this set so they can never disagree about which subtrees
-# were inspected.
+# Directory names skipped during disk walks at every level. Restricted to
+# names that are unambiguously not (and never contain) a git checkout.
 PRUNE_DIRS = frozenset({
     "node_modules",
     "__pycache__",
@@ -23,6 +22,14 @@ PRUNE_DIRS = frozenset({
     ".tox",
     ".mypy_cache",
     ".pytest_cache",
+})
+
+# Directory names skipped only when encountered INSIDE an already-discovered
+# git repo. These are common build-output folders — a user may legitimately
+# group repos under a top-level ``target/`` or ``build/`` directory, but
+# inside a repo they're guaranteed to be artifact dumps and walking them
+# wastes time on huge trees (Rust ``target/``, Java ``build/``, etc.).
+IN_REPO_PRUNE_DIRS = frozenset({
     ".next",
     ".turbo",
     "dist",

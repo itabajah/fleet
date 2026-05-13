@@ -15,6 +15,27 @@
 # (e.g. Import-Module $HOME\src\fleet\Fleet.psm1)
 
 $script:FleetSrc = Join-Path $PSScriptRoot 'src'
+$script:FleetPython = $null
+
+function Resolve-FleetPython {
+    # Resolve the Python launcher to use, once per session. Prefers `python`
+    # then `python3` then the Windows `py -3` launcher. Cached so we don't
+    # re-probe on every command.
+    if ($script:FleetPython) { return $script:FleetPython }
+    foreach ($exe in @('python', 'python3')) {
+        $cmd = Get-Command $exe -ErrorAction SilentlyContinue
+        if ($cmd) {
+            $script:FleetPython = @($cmd.Source)
+            return $script:FleetPython
+        }
+    }
+    $py = Get-Command py -ErrorAction SilentlyContinue
+    if ($py) {
+        $script:FleetPython = @($py.Source, '-3')
+        return $script:FleetPython
+    }
+    throw 'fleet: no Python interpreter found on PATH (tried `python`, `python3`, `py -3`). Install Python >= 3.10.'
+}
 
 function Add-FleetSrcToPyPath {
     # Prepend $script:FleetSrc to PYTHONPATH unless it's already there as a
@@ -65,7 +86,8 @@ function Invoke-FleetPython {
     $oldPyPath = $env:PYTHONPATH
     try {
         Add-FleetSrcToPyPath
-        & python -m fleet @ArgList
+        $py = Resolve-FleetPython
+        & $py[0] @($py | Select-Object -Skip 1) -m fleet @ArgList
         $global:LASTEXITCODE = $LASTEXITCODE
     }
     finally {
@@ -82,7 +104,8 @@ function Invoke-FleetPythonCapture {
     $oldPyPath = $env:PYTHONPATH
     try {
         Add-FleetSrcToPyPath
-        $stdout = & python -m fleet @ArgList
+        $py = Resolve-FleetPython
+        $stdout = & $py[0] @($py | Select-Object -Skip 1) -m fleet @ArgList
         $exitCode = $LASTEXITCODE
     }
     finally {

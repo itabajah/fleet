@@ -25,8 +25,13 @@ __all__ = ["cmd_new", "cmd_list", "cmd_info", "cmd_sync", "cmd_end", "cmd_path"]
 
 
 def register(subparsers: argparse._SubParsersAction,
-             fleet_arg: argparse.ArgumentParser) -> None:
-    """Register the ``fleet task`` command group."""
+             fleet_arg: argparse.ArgumentParser) -> argparse._SubParsersAction:
+    """Register the ``fleet task`` command group.
+
+    Returns the inner sub-action so the caller (``cli.build_parser``) can
+    attach additional ``task <foo>`` stubs without reaching into argparse
+    private attributes.
+    """
     p = subparsers.add_parser("task", help="manage task workspaces")
     sub = p.add_subparsers(dest="task_cmd", required=True, metavar="<command>")
 
@@ -94,3 +99,5 @@ def register(subparsers: argparse._SubParsersAction,
     )
     s_path.add_argument("name", help="task name")
     s_path.set_defaults(func=cmd_path)
+
+    return sub

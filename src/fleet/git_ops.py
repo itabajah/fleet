@@ -164,16 +164,20 @@ def origin_host(remote_url: str) -> str:
     return remote_url.lower()
 
 
-def detect_default_branch(repo_path: Path, *, offline: bool = False) -> str:
+def detect_default_branch(repo_path: Path, *, offline: bool = False,
+                          allow_set_head: bool = False) -> str:
     """Return origin's default branch (e.g. 'main').
 
-    Tries symbolic-ref first; if that fails and ``offline`` is False,
-    refreshes origin/HEAD via ``git remote set-head origin --auto``; as a
-    last resort, probes for ``main`` then ``master`` from local refs.
-    Raises FleetError if nothing works.
+    Resolution order:
+      1. ``git symbolic-ref refs/remotes/origin/HEAD`` (no network).
+      2. Probe local refs for ``main`` then ``master`` (no network).
+      3. If ``allow_set_head=True`` AND ``offline=False``, refresh
+         ``origin/HEAD`` via ``git remote set-head origin --auto`` and
+         retry step 1. Skipped by default because it both round-trips to
+         the network and mutates a local ref.
 
-    Pass ``offline=True`` from code paths that promised the user no network
-    activity (e.g. ``--no-pull``).
+    Raises :class:`FleetError` if nothing works. Pass ``offline=True`` from
+    code paths that promised the user no network activity (e.g. ``--no-pull``).
     """
     r = run_git("symbolic-ref", "--quiet", "--short",
                 "refs/remotes/origin/HEAD", cwd=repo_path, check=False)
@@ -182,7 +186,14 @@ def detect_default_branch(repo_path: Path, *, offline: bool = False) -> str:
         if ref.startswith("origin/"):
             return ref[len("origin/"):]
 
-    if not offline:
+    for candidate in ("main", "master"):
+        probe = run_git("show-ref", "--verify", "--quiet",
+                        f"refs/remotes/origin/{candidate}",
+                        cwd=repo_path, check=False)
+        if probe.returncode == 0:
+            return candidate
+
+    if allow_set_head and not offline:
         refresh = run_git("remote", "set-head", "origin", "--auto",
                           cwd=repo_path, check=False)
         if refresh.returncode == 0:
@@ -192,13 +203,6 @@ def detect_default_branch(repo_path: Path, *, offline: bool = False) -> str:
                 ref = r.stdout.strip()
                 if ref.startswith("origin/"):
                     return ref[len("origin/"):]
-
-    for candidate in ("main", "master"):
-        probe = run_git("show-ref", "--verify", "--quiet",
-                        f"refs/remotes/origin/{candidate}",
-                        cwd=repo_path, check=False)
-        if probe.returncode == 0:
-            return candidate
 
     if offline:
         raise FleetError(

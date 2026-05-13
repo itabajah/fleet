@@ -21,8 +21,12 @@ MANIFEST_FILENAME = "task.json"
 
 
 def now_iso() -> str:
-    """Timezone-aware ISO-8601 timestamp suitable for manifest fields."""
-    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+    """UTC ISO-8601 timestamp (e.g. ``2026-05-13T10:00:00+00:00``).
+
+    Anchored to UTC so two machines in different time zones produce
+    comparable manifest timestamps for the same instant.
+    """
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 @dataclass
@@ -170,15 +174,15 @@ class Manifest:
             "repos": [r.to_dict() for r in self.repos],
         }
         tmp = manifest_path.with_suffix(manifest_path.suffix + ".tmp")
+        tmp.write_text(
+            json.dumps(payload, indent=2) + "\n", encoding="utf-8",
+        )
         try:
-            tmp.write_text(
-                json.dumps(payload, indent=2) + "\n", encoding="utf-8",
-            )
             os.replace(tmp, manifest_path)
-        finally:
-            if tmp.exists():
-                with contextlib.suppress(OSError):
-                    tmp.unlink()
+        except OSError:
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+            raise
 
     # ------------------------------ helpers ----------------------------------
 

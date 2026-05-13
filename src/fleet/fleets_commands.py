@@ -6,7 +6,7 @@ import argparse
 from pathlib import Path
 
 from fleet.console import cyan, gray, green, yellow
-from fleet.fleets_config import FleetsConfig, config_path
+from fleet.fleets_config import FleetsConfig, _config_lock, config_path
 
 
 def cmd_fleets_list(_args: argparse.Namespace) -> int:
@@ -29,10 +29,11 @@ def cmd_fleets_list(_args: argparse.Namespace) -> int:
 
 
 def cmd_fleets_add(args: argparse.Namespace) -> int:
-    cfg = FleetsConfig.load()
-    root = Path(args.root) if args.root else Path.cwd()
-    cfg.add(args.name, root, force=args.force)
-    cfg.save()
+    with _config_lock(config_path()):
+        cfg = FleetsConfig.load()
+        root = Path(args.root) if args.root else Path.cwd()
+        cfg.add(args.name, root, force=args.force)
+        cfg.save()
     print(green(f"✓ Registered fleet '{args.name}' at {cfg.fleets[args.name].root}"))
     if cfg.default == args.name:
         print(gray("  (set as default)"))
@@ -42,17 +43,19 @@ def cmd_fleets_add(args: argparse.Namespace) -> int:
 
 
 def cmd_fleets_default(args: argparse.Namespace) -> int:
-    cfg = FleetsConfig.load()
-    cfg.set_default(args.name)
-    cfg.save()
+    with _config_lock(config_path()):
+        cfg = FleetsConfig.load()
+        cfg.set_default(args.name)
+        cfg.save()
     print(green(f"✓ Default fleet is now '{args.name}'"))
     return 0
 
 
 def cmd_fleets_remove(args: argparse.Namespace) -> int:
-    cfg = FleetsConfig.load()
-    cfg.remove(args.name)
-    cfg.save()
+    with _config_lock(config_path()):
+        cfg = FleetsConfig.load()
+        cfg.remove(args.name)
+        cfg.save()
     print(green(f"✓ Unregistered fleet '{args.name}'"))
     if cfg.default:
         print(gray(f"  Default is now '{cfg.default}'."))

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 
 from fleet import git_ops
 from fleet.console import cyan, dim, green, red, yellow
@@ -188,9 +189,6 @@ def cmd_info(args: argparse.Namespace) -> int:
         else:
             flags.append(green("in sync with origin"))
         print(f"      status:    {', '.join(flags)}")
-        # Combine head + log into one git call (`log -1 --format='%h %s on %D'`
-        # would mix metadata; cheaper to issue one log invocation that prints
-        # both the abbrev-ref and the latest commit subject in one shot).
         head_line = git_ops.run_git(
             "log", "-1", "--format=%H %h %s",
             cwd=r.worktree_path, check=False,
@@ -217,7 +215,9 @@ def cmd_path(args: argparse.Namespace) -> int:
         raise FleetError(
             f"No such task in fleet '{active_fleet_name()}': {workspace}"
         )
-    print(str(workspace))
+    # Explicit raw write so the contract (one line, terminated with a
+    # single newline) is obvious to shell-integration callers.
+    sys.stdout.write(str(workspace) + "\n")
     return 0
 
 

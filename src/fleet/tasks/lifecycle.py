@@ -198,12 +198,12 @@ def cmd_new(args: argparse.Namespace) -> int:
 
     workspace.mkdir(parents=True, exist_ok=False)
 
-    created_worktrees: list[tuple[RepoInfo, Path]] = []
+    created_worktrees: list[tuple[RepoInfo, Path, str]] = []
     try:
         for repo in chosen:
             default = _prepare_canonical(repo, no_pull=args.no_pull)
             wt = _add_worktree(repo, name, default, workspace)
-            created_worktrees.append((repo, wt))
+            created_worktrees.append((repo, wt, branch))
 
         context_md = workspace / "context.md"
         context_md.write_text(
@@ -240,13 +240,15 @@ def cmd_new(args: argparse.Namespace) -> int:
         )
         manifest.save(workspace)
     except BaseException:
-        # Catch BaseException so Ctrl-C also triggers rollback.
+        # Catch BaseException so Ctrl-C also triggers rollback. Only the
+        # branches we actually created (paired with worktrees in this run)
+        # are deleted — never delete a branch we didn't make.
         print("\nERROR during scaffolding — rolling back created worktrees...",
               file=sys.stderr)
-        for repo, wt in created_worktrees:
+        for repo, wt, br in created_worktrees:
             git_ops.run_git("worktree", "remove", "--force", str(wt),
                             cwd=repo.path, check=False)
-            git_ops.run_git("branch", "-D", branch,
+            git_ops.run_git("branch", "-D", br,
                             cwd=repo.path, check=False)
         with contextlib.suppress(Exception):
             shutil.rmtree(workspace, ignore_errors=True)
@@ -265,20 +267,24 @@ def _archive_workspace(workspace: Path, name: str) -> Path:
     """Zip up ``task.json`` + ``context.md`` + ``scratch/`` into the archive root.
 
     Uses a UTC timestamp so two ``task end`` runs in different time zones
-    don't collide subtly. The collision guard handles same-second retries.
+    don't collide subtly. The collision guard handles same-second retries
+    and is bounded so a pathological archive directory can't hang us.
     """
     archive_dir = archive_root()
     archive_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     archive_path = archive_dir / f"{name}-{stamp}.zip"
     if archive_path.exists():
-        i = 2
-        while True:
+        for i in range(2, 1002):
             candidate = archive_dir / f"{name}-{stamp}-{i}.zip"
             if not candidate.exists():
                 archive_path = candidate
                 break
-            i += 1
+        else:
+            raise FleetError(
+                f"Refusing to archive: more than 1000 archives already exist "
+                f"with prefix {name}-{stamp} in {archive_dir}."
+            )
 
     with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for top in ("task.json", "context.md"):
@@ -289,7 +295,10 @@ def _archive_workspace(workspace: Path, name: str) -> Path:
         if scratch.is_dir():
             for item in scratch.rglob("*"):
                 if item.is_file():
-                    zf.write(item, arcname=str(item.relative_to(workspace)))
+                    # POSIX-style arcname so archives extracted on
+                    # Linux/macOS nest correctly (zip spec mandates '/').
+                    rel = item.relative_to(workspace).as_posix()
+                    zf.write(item, arcname=rel)
     return archive_path
 
 
@@ -358,11 +367,16 @@ def cmd_end(args: argparse.Namespace) -> int:
             git_ops.run_git("worktree", "prune", cwd=r.canonical_path, check=False)
 
     if failures:
+        # Worktree teardown failed. The archive is still useful; tell the
+        # user it's there so a retry can short-circuit re-archiving.
         print("\nWARN: some worktrees could not be removed:", file=sys.stderr)
         for line in failures:
             print(line, file=sys.stderr)
         print(f"\nFix those manually, then delete the workspace folder:\n"
-              f"  {workspace}", file=sys.stderr)
+              f"  {workspace}\n"
+              f"(metadata already archived to {archive_path}; safe to "
+              f"discard the workspace once the worktrees are gone.)",
+              file=sys.stderr)
         return 2
 
     try:

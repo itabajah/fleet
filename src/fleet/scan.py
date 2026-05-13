@@ -24,7 +24,8 @@ import json
 import os
 from pathlib import Path
 
-from fleet.console import cyan, gray, green, yellow
+from fleet.console import cyan, gray, green
+from fleet.errors import FleetError
 from fleet.paths import REGISTRY_FILENAME
 from fleet.registry_tree import empty_node, expanded_registry
 from fleet.state import find_repos_root, load_registry
@@ -158,21 +159,30 @@ def _collapse(structure: dict) -> dict:
     """Recursively collapse single-child folder nodes into ``parent/child`` keys.
 
     Preserves insertion order so collapsed entries take the slot of their
-    parent.
+    parent. Tolerant of nodes that lack ``subfolders``/``repos``/``exclude``
+    fields (e.g. user-curated stubs like ``{"sync": false}`` carried over
+    from existing config).
     """
     # Recurse first (bottom-up) so child structures are already collapsed.
     for key in list(structure.keys()):
-        structure[key]["subfolders"] = _collapse(structure[key]["subfolders"])
+        node = structure[key]
+        subs = node.get("subfolders")
+        if not isinstance(subs, dict):
+            node["subfolders"] = {}
+            subs = node["subfolders"]
+        node["subfolders"] = _collapse(subs)
 
     rebuilt: dict = {}
     changed = False
     for key, node in structure.items():
-        has_repos = bool(node["repos"])
-        has_exclude = bool(node["exclude"])
-        if (not has_repos and not has_exclude
-                and len(node["subfolders"]) == 1):
-            sub_key, sub_node = next(iter(node["subfolders"].items()))
-            sub_node["sync"] = bool(node["sync"] and sub_node["sync"])
+        has_repos = bool(node.get("repos"))
+        has_exclude = bool(node.get("exclude"))
+        subs = node.get("subfolders") or {}
+        sync = bool(node.get("sync", True))
+        if (sync and not has_repos and not has_exclude
+                and len(subs) == 1):
+            sub_key, sub_node = next(iter(subs.items()))
+            sub_node["sync"] = bool(sync and sub_node.get("sync", True))
             rebuilt[f"{key}/{sub_key}"] = sub_node
             changed = True
         else:
@@ -183,26 +193,50 @@ def _collapse(structure: dict) -> dict:
 def _sort_arrays(structure: dict) -> None:
     """Sort ``repos`` and ``exclude`` alphabetically (case-insensitive) at every level."""
     for node in structure.values():
-        node["repos"] = sorted(node["repos"], key=str.casefold)
-        node["exclude"] = sorted(node["exclude"], key=str.casefold)
-        _sort_arrays(node["subfolders"])
+        if "repos" in node:
+            node["repos"] = sorted(node["repos"], key=str.casefold)
+        if "exclude" in node:
+            node["exclude"] = sorted(node["exclude"], key=str.casefold)
+        subs = node.get("subfolders")
+        if isinstance(subs, dict):
+            _sort_arrays(subs)
 
 
 def _preserve_disabled(structure: dict, existing: dict) -> None:
-    """Re-attach ``sync:false`` nodes from existing config that the walk missed.
+    """Re-attach ``sync:false`` nodes (and their ``exclude``/``subfolders``)
+    from existing config that the walk missed, OR merge user-curated
+    metadata into stub nodes the walk created.
 
     Folders pruned by the walker (notably ``..me``) never produce nodes
-    during the disk walk. Without this pass, hand-curated disable flags
-    would silently disappear on every ``fleet scan``.
+    during the disk walk. And folders the walker visited but found
+    disabled get a stub node from ``_build_structure`` that lacks the
+    user's ``exclude``/``subfolders``. Without this pass, hand-curated
+    data under disabled folders would silently disappear on every
+    ``fleet scan``.
     """
     for name, node in existing.items():
         if not node.get("sync", True):
-            if name not in structure:
+            target = structure.get(name)
+            if target is None:
+                # Walker never visited (e.g. pruned dir) — re-create.
                 structure[name] = {
-                    "sync": False, "repos": [],
-                    "exclude": [], "subfolders": {},
+                    "sync": False,
+                    "repos": list(node.get("repos") or []),
+                    "exclude": list(node.get("exclude") or []),
+                    "subfolders": dict(node.get("subfolders") or {}),
                 }
-            # Don't recurse: _cleanup collapses disabled nodes to {"sync": false}.
+            else:
+                # Walker created a stub; merge user-curated metadata in.
+                # Union exclude lists; prefer the existing subfolders dict
+                # whenever the walker didn't produce one.
+                user_excl = list(node.get("exclude") or [])
+                if user_excl:
+                    target["exclude"] = sorted(
+                        set(target.get("exclude") or []) | set(user_excl),
+                        key=str.casefold,
+                    )
+                if not target.get("subfolders"):
+                    target["subfolders"] = dict(node.get("subfolders") or {})
             continue
         # Enabled in existing — only recurse into subfolders the walk created.
         if name in structure:
@@ -211,19 +245,31 @@ def _preserve_disabled(structure: dict, existing: dict) -> None:
 
 
 def _cleanup(structure: dict) -> None:
-    """Drop empty fields. Disabled nodes keep only their ``sync`` flag."""
+    """Drop empty fields. Disabled nodes keep ``sync:false`` plus any
+    ``exclude``/``subfolders`` the user hand-curated, so re-running
+    ``fleet scan`` never destroys preserved settings."""
     for key in list(structure.keys()):
         node = structure[key]
-        if not node["sync"]:
-            structure[key] = {"sync": False}
+        if not node.get("sync", True):
+            kept: dict = {"sync": False}
+            if node.get("exclude"):
+                kept["exclude"] = node["exclude"]
+            subs = node.get("subfolders") or {}
+            if subs:
+                _cleanup(subs)
+                if subs:
+                    kept["subfolders"] = subs
+            structure[key] = kept
             continue
-        _cleanup(node["subfolders"])
-        if not node["repos"]:
-            del node["repos"]
-        if not node["exclude"]:
-            del node["exclude"]
-        if not node["subfolders"]:
-            del node["subfolders"]
+        subs = node.get("subfolders")
+        if isinstance(subs, dict):
+            _cleanup(subs)
+        if not node.get("repos"):
+            node.pop("repos", None)
+        if not node.get("exclude"):
+            node.pop("exclude", None)
+        if not node.get("subfolders"):
+            node.pop("subfolders", None)
 
 
 def _count_enabled(structure: dict) -> int:
@@ -245,13 +291,13 @@ def _atomic_write_json(path: Path, payload: dict) -> None:
     mid-write can't truncate the existing file."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     try:
-        tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         os.replace(tmp, path)
-    finally:
-        if tmp.exists():
-            with contextlib.suppress(OSError):
-                tmp.unlink()
+    except OSError:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -271,12 +317,12 @@ def cmd_scan(_args: argparse.Namespace) -> int:
 
     scan_root = (repos_root / config_root).resolve()
     if not scan_root.is_dir():
-        print(yellow(
-            f"⚠ Warning: Root path '{scan_root}' does not exist. "
-            "Defaulting to repos root."
-        ))
-        scan_root = repos_root
-        config_root = "."
+        raise FleetError(
+            f"Configured `root` field in {target_path} points at a path "
+            f"that does not exist on disk: {scan_root}\n"
+            f"Edit `root` to a valid relative path (use \".\" for the "
+            f"fleet root) and re-run `fleet scan`."
+        )
 
     print(cyan(f"Scanning for git repositories in: {scan_root}"))
     print(gray("This may take a moment..."))

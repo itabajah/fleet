@@ -90,7 +90,7 @@ def build_parser() -> argparse.ArgumentParser:
     sync.register(subparsers, fleet_arg)
     scan.register(subparsers, fleet_arg)
     repos_command.register(subparsers, fleet_arg)
-    tasks.register(subparsers, fleet_arg)
+    task_sub = tasks.register(subparsers, fleet_arg)
     fleets_commands.register(subparsers, fleet_arg)
 
     # `fleet open` and `fleet task open` are PS-only. Stub them here so the
@@ -103,14 +103,9 @@ def build_parser() -> argparse.ArgumentParser:
     s_open.add_argument("name", nargs="?", help="task name")
     s_open.set_defaults(func=_open_unsupported)
 
-    # Patch the `task` group in-place to add an `open` stub at the same
-    # level as `task new`/`list`/etc. This is purely so users get a helpful
-    # error rather than "invalid choice: 'open'".
-    task_action = next(
-        a for a in subparsers.choices["task"]._actions
-        if isinstance(a, argparse._SubParsersAction)
-    )
-    s_topen = task_action.add_parser(
+    # Same for `fleet task open` — added on the sub-action returned by
+    # tasks.register so we don't need to reach into argparse internals.
+    s_topen = task_sub.add_parser(
         "open",
         help="(PowerShell-only) cd into a task workspace and launch VS Code",
     )
@@ -135,10 +130,15 @@ def _needs_active_fleet(args: argparse.Namespace) -> bool:
 
 def main(argv: list[str] | None = None) -> int:
     # Windows consoles default to cp1252 when output is piped/captured,
-    # which blows up on the ⚠/✓/✗ glyphs we use for status. Force UTF-8.
+    # which blows up on the ⚠/✓/✗ glyphs we use for status. Force UTF-8
+    # only when the stream isn't already UTF-8, so importers that have
+    # already configured stdout aren't disturbed.
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is None:
+            continue
+        encoding = (getattr(stream, "encoding", "") or "").lower()
+        if encoding.replace("-", "") == "utf8":
             continue
         with contextlib.suppress(OSError):
             reconfigure(encoding="utf-8", errors="replace")

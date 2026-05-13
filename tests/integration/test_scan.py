@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from fleet.errors import FleetError
 from fleet.scan import cmd_scan
 from fleet.state import set_active_fleet
 from helpers.git import write_marker_repo
@@ -59,6 +60,45 @@ def test_scan_preserves_disabled_node(tmp_path: Path) -> None:
     assert reg["."]["repos"] == ["alpha"]
 
 
+def test_scan_preserves_exclude_under_disabled(tmp_path: Path) -> None:
+    """User-set `exclude` on a disabled folder must survive a re-scan
+    (whether or not the folder is on disk)."""
+    write_marker_repo(tmp_path / "alpha")
+    (tmp_path / "fleet.json").write_text(
+        json.dumps({
+            "root": ".",
+            "vendored": {"sync": False, "exclude": ["secret-repo"]},
+        }) + "\n",
+        encoding="utf-8",
+    )
+    set_active_fleet("demo", tmp_path)
+    cmd_scan(argparse.Namespace())
+    reg = _registry(tmp_path)
+    assert reg["vendored"]["sync"] is False
+    assert reg["vendored"]["exclude"] == ["secret-repo"]
+
+
+def test_scan_preserves_subfolders_under_disabled(tmp_path: Path) -> None:
+    """User-set nested `subfolders` under a disabled folder must survive."""
+    # `vendored/` exists on disk so the walker visits it and creates a stub;
+    # the merge path must still preserve the user's nested subfolders entry.
+    (tmp_path / "vendored").mkdir()
+    write_marker_repo(tmp_path / "alpha")
+    nested = {"deep": {"sync": False}}
+    (tmp_path / "fleet.json").write_text(
+        json.dumps({
+            "root": ".",
+            "vendored": {"sync": False, "subfolders": nested},
+        }) + "\n",
+        encoding="utf-8",
+    )
+    set_active_fleet("demo", tmp_path)
+    cmd_scan(argparse.Namespace())
+    reg = _registry(tmp_path)
+    assert reg["vendored"]["sync"] is False
+    assert reg["vendored"].get("subfolders", {}).get("deep") == {"sync": False}
+
+
 def test_scan_preserves_manual_exclude(tmp_path: Path) -> None:
     write_marker_repo(tmp_path / "alpha")
     write_marker_repo(tmp_path / "beta")
@@ -101,18 +141,17 @@ def test_scan_writes_atomically_no_tmp_left(tmp_path: Path) -> None:
     assert list(tmp_path.glob("fleet.json.tmp")) == []
 
 
-def test_scan_warns_on_missing_root_field(tmp_path: Path,
-                                          capsys: pytest.CaptureFixture[str]) -> None:
-    """A misconfigured `root` field falls back to repos root with a warning."""
+def test_scan_refuses_invalid_root_field(tmp_path: Path) -> None:
+    """A misconfigured `root` field is a hard error \u2014 no silent rewrite."""
     (tmp_path / "fleet.json").write_text(
         json.dumps({"root": "does-not-exist"}) + "\n", encoding="utf-8",
     )
     set_active_fleet("demo", tmp_path)
-    cmd_scan(argparse.Namespace())
-    out = capsys.readouterr().out
-    assert "does not exist" in out
+    with pytest.raises(FleetError, match="does not exist"):
+        cmd_scan(argparse.Namespace())
+    # fleet.json untouched.
     reg = _registry(tmp_path)
-    assert reg["root"] == "."
+    assert reg["root"] == "does-not-exist"
 
 
 def test_scan_with_root_subdir(tmp_path: Path) -> None:

@@ -21,10 +21,12 @@ import os
 from collections.abc import Iterator
 from pathlib import Path
 
-from fleet.paths import PRUNE_DIRS, TOOL_HOME_DIRNAME, fleet_install_dir
+from fleet.paths import IN_REPO_PRUNE_DIRS, PRUNE_DIRS, TOOL_HOME_DIRNAME, fleet_install_dir
 
-# Names skipped during disk walks. ``.git`` is internal git state.
+# Names skipped during disk walks at every level. ``.git`` is internal git state.
 _PRUNE_DIRS = PRUNE_DIRS | {".git", TOOL_HOME_DIRNAME}
+# Names additionally skipped when descending into an already-discovered repo.
+_IN_REPO_PRUNE_DIRS = IN_REPO_PRUNE_DIRS
 
 
 def looks_like_git_repo(p: Path) -> bool:
@@ -45,10 +47,24 @@ def walk_repos(root: Path) -> Iterator[Path]:
         skip = None
 
     seen: set[Path] = set()
-    stack: list[Path] = [root]
+    # Yield root itself if it's a repo, so a fleet rooted directly at a
+    # single git checkout still discovers it. The bool in each stack entry
+    # tracks whether we're already descending inside a discovered repo, so
+    # build-output dirs (``target``/``build``/etc.) can be pruned only
+    # there — not at the top level where users may group repos under them.
+    root_is_repo = False
+    try:
+        root_real = root.resolve()
+        if (skip is None or root_real != skip) and looks_like_git_repo(root):
+            seen.add(root_real)
+            root_is_repo = True
+            yield root
+    except OSError:
+        pass
+    stack: list[tuple[Path, bool]] = [(root, root_is_repo)]
 
     while stack:
-        cur = stack.pop()
+        cur, inside_repo = stack.pop()
         try:
             with os.scandir(cur) as it:
                 entries = list(it)
@@ -63,6 +79,8 @@ def walk_repos(root: Path) -> Iterator[Path]:
                 continue
             if entry.name in _PRUNE_DIRS:
                 continue
+            if inside_repo and entry.name in _IN_REPO_PRUNE_DIRS:
+                continue
             p = Path(entry.path)
             try:
                 real = p.resolve()
@@ -73,6 +91,7 @@ def walk_repos(root: Path) -> Iterator[Path]:
             if real in seen:
                 continue
             seen.add(real)
-            if looks_like_git_repo(p):
+            is_repo = looks_like_git_repo(p)
+            if is_repo:
                 yield p
-            stack.append(p)
+            stack.append((p, inside_repo or is_repo))

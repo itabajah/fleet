@@ -25,12 +25,52 @@ import json
 import os
 import re
 import sys
+import time
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from fleet.errors import FleetError
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-]{0,31}$")
+
+_LOCK_TIMEOUT_SECONDS = 5.0
+_LOCK_POLL_SECONDS = 0.05
+
+
+@contextlib.contextmanager
+def _config_lock(path: Path) -> Iterator[None]:
+    """Cross-process advisory lock around the fleets config.
+
+    Uses an exclusive-create sidecar (``<path>.lock``) so concurrent
+    ``fleet fleets add`` invocations serialize their read-modify-write
+    rather than losing updates. Best-effort: gives up after
+    ``_LOCK_TIMEOUT_SECONDS`` and proceeds anyway, so a stale lock from a
+    crashed process never permanently wedges the CLI.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    deadline = time.monotonic() + _LOCK_TIMEOUT_SECONDS
+    fd: int | None = None
+    while True:
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            break
+        except FileExistsError:
+            if time.monotonic() >= deadline:
+                # Stale lock fallback: proceed without locking. Two writers
+                # can still collide here, but better than hanging forever.
+                fd = None
+                break
+            time.sleep(_LOCK_POLL_SECONDS)
+    try:
+        yield
+    finally:
+        if fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        with contextlib.suppress(OSError):
+            lock_path.unlink()
 
 
 def _config_file() -> Path:
@@ -105,13 +145,13 @@ class FleetsConfig:
             },
         }
         tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
         try:
-            tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
             os.replace(tmp, path)
-        finally:
-            if tmp.exists():
-                with contextlib.suppress(OSError):
-                    tmp.unlink()
+        except OSError:
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+            raise
 
     # ------------------------------ mutators ---------------------------------
 

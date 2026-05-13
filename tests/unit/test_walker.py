@@ -52,9 +52,36 @@ def test_walk_prunes_node_modules(tmp_path: Path) -> None:
 
 
 def test_walk_prunes_dotted_dirs(tmp_path: Path) -> None:
-    for name in (".venv", ".tox", "__pycache__", "dist"):
+    for name in (".venv", ".tox", "__pycache__"):
         write_marker_repo(tmp_path / name / "x")
     assert list(walk_repos(tmp_path)) == []
+
+
+def test_walk_does_not_prune_build_output_names(tmp_path: Path) -> None:
+    """``dist``/``build``/``target``/``bin`` are common project dir names but
+    must not be pruned at the top level — a user may legitimately group
+    repos under any of them.
+    """
+    repo = write_marker_repo(tmp_path / "dist" / "really-a-repo")
+    assert repo in list(walk_repos(tmp_path))
+
+
+def test_walk_prunes_build_output_inside_repos(tmp_path: Path) -> None:
+    """Inside a discovered repo, build-output dirs (``target``/``build``/etc.)
+    are skipped so we don't waste time scanning Rust/Java artifact trees.
+    """
+    outer = write_marker_repo(tmp_path / "rust-project")
+    # A nested repo under ``target/`` is artifact-area and intentionally NOT discovered.
+    write_marker_repo(outer / "target" / "vendored-thing")
+    found = list(walk_repos(tmp_path))
+    assert outer in found
+    assert all("target" not in p.parts for p in found if p != outer)
+
+
+def test_walk_yields_root_itself_when_repo(tmp_path: Path) -> None:
+    """Fleet rooted directly at a single git checkout still discovers it."""
+    write_marker_repo(tmp_path)
+    assert tmp_path in list(walk_repos(tmp_path))
 
 
 def test_walk_prunes_tool_home(tmp_path: Path) -> None:
