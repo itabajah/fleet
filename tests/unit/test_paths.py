@@ -19,10 +19,6 @@ def test_root_meta_keys_just_root() -> None:
     assert frozenset({"root"}) == paths.ROOT_META_KEYS
 
 
-def test_tool_home_dirname() -> None:
-    assert paths.TOOL_HOME_DIRNAME == "..me"
-
-
 def test_tasks_root_base_respects_env(monkeypatch: pytest.MonkeyPatch,
                                       tmp_path: Path) -> None:
     target = tmp_path / "elsewhere"
@@ -44,10 +40,3 @@ def test_tasks_root_base_default_posix(monkeypatch: pytest.MonkeyPatch,
     # Path.home() reads HOME on POSIX; on Windows we'd need USERPROFILE.
     expected = Path.home() / "fleet-tasks"
     assert paths.tasks_root_base() == expected
-
-
-def test_fleet_install_dir_points_at_repo_root() -> None:
-    install = paths.fleet_install_dir()
-    # Sanity: the install dir should contain `Fleet.psm1` and `pyproject.toml`.
-    assert (install / "pyproject.toml").is_file()
-    assert (install / "Fleet.psm1").is_file()

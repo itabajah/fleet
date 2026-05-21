@@ -42,11 +42,6 @@ IN_REPO_PRUNE_DIRS = frozenset({
 # Top-level keys in fleet.json that aren't folder nodes.
 ROOT_META_KEYS = frozenset({"root"})
 
-# Local convention: the directory holding fleet's own clone is named with
-# a leading-dot prefix (e.g. `..me`) so it sorts to the top in dir listings.
-# It's both pruned during scans and force-disabled in fleet.json.
-TOOL_HOME_DIRNAME = "..me"
-
 
 def _default_tasks_root() -> Path:
     """Per-platform default for the tasks root.
@@ -71,12 +66,3 @@ def tasks_root_base() -> Path:
     if override:
         return Path(override)
     return _default_tasks_root()
-
-
-def fleet_install_dir() -> Path:
-    """Absolute path to the directory holding this fleet checkout.
-
-    Resolved from ``__file__`` so we can prune fleet's own source tree from
-    every disk walk regardless of where the user cloned it.
-    """
-    return Path(__file__).resolve().parents[2]

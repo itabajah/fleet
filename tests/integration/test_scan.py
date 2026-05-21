@@ -46,17 +46,18 @@ def test_scan_collapses_single_child_chain(tmp_path: Path) -> None:
 
 
 def test_scan_preserves_disabled_node(tmp_path: Path) -> None:
-    """Hand-edited `sync: false` survives a re-scan even when the dir is pruned."""
-    write_marker_repo(tmp_path / "..me" / "self-clone")
+    """Hand-edited `sync: false` survives a re-scan, including when the folder
+    exists on disk and contains repos."""
+    write_marker_repo(tmp_path / "vendored" / "self-clone")
     write_marker_repo(tmp_path / "alpha")
     (tmp_path / "fleet.json").write_text(
-        json.dumps({"root": ".", "..me": {"sync": False}}) + "\n",
+        json.dumps({"root": ".", "vendored": {"sync": False}}) + "\n",
         encoding="utf-8",
     )
     set_active_fleet("demo", tmp_path)
     cmd_scan(argparse.Namespace())
     reg = _registry(tmp_path)
-    assert reg["..me"] == {"sync": False}
+    assert reg["vendored"] == {"sync": False}
     assert reg["."]["repos"] == ["alpha"]
 
 

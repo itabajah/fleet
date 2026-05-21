@@ -9,10 +9,11 @@ repo's ``temp/`` subdirectory.
 Pruning:
 
   * names in :data:`fleet.paths.PRUNE_DIRS` (``node_modules``, ``.venv``, …)
-  * the ``..me`` directory (the fleet checkout's local convention)
-  * the directory holding fleet's own source tree
   * any path already visited (resolved-path dedup, so symlink/junction
     loops can't crash the walk)
+
+No directory names are hard-coded as fleet-specific exclusions: users who
+want a folder skipped should set ``sync: false`` on it in ``fleet.json``.
 """
 
 from __future__ import annotations
@@ -21,10 +22,10 @@ import os
 from collections.abc import Iterator
 from pathlib import Path
 
-from fleet.paths import IN_REPO_PRUNE_DIRS, PRUNE_DIRS, TOOL_HOME_DIRNAME, fleet_install_dir
+from fleet.paths import IN_REPO_PRUNE_DIRS, PRUNE_DIRS
 
 # Names skipped during disk walks at every level. ``.git`` is internal git state.
-_PRUNE_DIRS = PRUNE_DIRS | {".git", TOOL_HOME_DIRNAME}
+_PRUNE_DIRS = PRUNE_DIRS | {".git"}
 # Names additionally skipped when descending into an already-discovered repo.
 _IN_REPO_PRUNE_DIRS = IN_REPO_PRUNE_DIRS
 
@@ -41,11 +42,6 @@ def walk_repos(root: Path) -> Iterator[Path]:
     Order is unspecified — callers that need a stable order should sort
     after collecting.
     """
-    try:
-        skip = fleet_install_dir().resolve()
-    except OSError:
-        skip = None
-
     seen: set[Path] = set()
     # Yield root itself if it's a repo, so a fleet rooted directly at a
     # single git checkout still discovers it. The bool in each stack entry
@@ -55,7 +51,7 @@ def walk_repos(root: Path) -> Iterator[Path]:
     root_is_repo = False
     try:
         root_real = root.resolve()
-        if (skip is None or root_real != skip) and looks_like_git_repo(root):
+        if looks_like_git_repo(root):
             seen.add(root_real)
             root_is_repo = True
             yield root
@@ -85,8 +81,6 @@ def walk_repos(root: Path) -> Iterator[Path]:
             try:
                 real = p.resolve()
             except OSError:
-                continue
-            if skip is not None and real == skip:
                 continue
             if real in seen:
                 continue

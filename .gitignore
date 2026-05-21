@@ -1,0 +1,68 @@
+# --- Python bytecode / build artifacts ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+build/
+dist/
+sdist/
+wheels/
+*.egg
+*.egg-info/
+.eggs/
+MANIFEST
+pip-wheel-metadata/
+
+# PEP 517 build backends
+.pdm-build/
+.hatch/
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# --- Test / coverage / lint caches ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.cache/
+.hypothesis/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+nosetests.xml
+
+# One-off pytest logs from local test runs
+pytest-out.txt
+pytest-*.log
+
+# --- Editor / IDE ---
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# --- OS ---
+ehthumbs.db
+Desktop.ini
+
+# --- fleet-specific local state ---
+# The fleet registry written by `fleet scan` is per-machine state, not source.
+# Comment this line out if you want to commit a curated registry.
+fleet.json

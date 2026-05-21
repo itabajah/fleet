@@ -4,7 +4,7 @@ Output shape::
 
     {
       "root": ".",
-      "..me": { "sync": false },
+      "vendored": { "sync": false },
       ".clusters": {
         "sync": true,
         "repos": [...],
@@ -207,11 +207,11 @@ def _preserve_disabled(structure: dict, existing: dict) -> None:
     from existing config that the walk missed, OR merge user-curated
     metadata into stub nodes the walk created.
 
-    Folders pruned by the walker (notably ``..me``) never produce nodes
-    during the disk walk. And folders the walker visited but found
-    disabled get a stub node from ``_build_structure`` that lacks the
-    user's ``exclude``/``subfolders``. Without this pass, hand-curated
-    data under disabled folders would silently disappear on every
+    Folders that no longer exist on disk never produce nodes during the
+    disk walk. And folders the walker visited but found disabled get a
+    stub node from ``_build_structure`` that lacks the user's
+    ``exclude``/``subfolders``. Without this pass, hand-curated data
+    under disabled folders would silently disappear on every
     ``fleet scan``.
     """
     for name, node in existing.items():

@@ -84,21 +84,6 @@ def test_walk_yields_root_itself_when_repo(tmp_path: Path) -> None:
     assert tmp_path in list(walk_repos(tmp_path))
 
 
-def test_walk_prunes_tool_home(tmp_path: Path) -> None:
-    write_marker_repo(tmp_path / "..me" / "self")
-    assert list(walk_repos(tmp_path)) == []
-
-
-def test_walk_skips_fleet_install_dir(tmp_path: Path,
-                                      monkeypatch: pytest.MonkeyPatch) -> None:
-    """The fleet install dir itself is excluded even when it sits inside the root."""
-    fake_install = tmp_path / "self-install"
-    write_marker_repo(fake_install)
-    monkeypatch.setattr("fleet.walker.fleet_install_dir",
-                        lambda: fake_install)
-    assert fake_install not in list(walk_repos(tmp_path))
-
-
 def test_walk_dedups_symlinks(tmp_path: Path) -> None:
     """Two paths that resolve to the same dir must yield only once."""
     target = write_marker_repo(tmp_path / "real")

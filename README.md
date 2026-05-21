@@ -26,8 +26,8 @@ dependencies** — Python stdlib + `git` is the entire stack.
   `fleet.json`. Manual `sync: false` and `exclude` entries survive
   re-scans; single-child folder chains collapse for compact output.
 - **Task workspaces**: `fleet task new bug-123 --repos foo,bar` creates
-  one `git worktree` per repo on a shared `task/bug-123` branch, with a
-  manifest, scratch dir, and one-shot teardown.
+  one `git worktree` per repo on a shared `task/<fleet>/bug-123` branch,
+  with a manifest, scratch dir, and one-shot teardown.
 - **Multiple fleets**: register any number of named fleets (each is a
   root directory + its own `fleet.json`), with a default and per-command
   `-F NAME` override.
@@ -109,14 +109,17 @@ That's the entire happy path.
 | `fleet scan`                                 | Walk disk, rewrite `fleet.json`, preserve manual settings                 |
 | `fleet repos`                                | List every git repo on disk; mark disabled / not-in-registry              |
 | `fleet task new <name> --repos a,b[,grp/c]`  | Create a task workspace with worktrees                                    |
+| `fleet task new ... --no-pull`               | Skip fetch + pull on each canonical repo (offline-safe; local refs only)  |
+| `fleet task new ... --dry-run`               | Validate inputs and print the plan without creating anything              |
 | `fleet task list [--quick]`                  | List active task workspaces (`--quick` skips dirty/unpushed checks)       |
+| `fleet task list --json`                     | Emit one JSON object per line on stdout (implies `--quick`)               |
 | `fleet task info <name>`                     | Detailed status of one task                                               |
 | `fleet task sync <name>`                     | Fetch + ff-pull each worktree on its task branch                          |
 | `fleet task end <name> [--force]`            | Archive `task.json`/`context.md`/`scratch/`, tear down worktrees          |
 | `fleet task path <name>`                     | Print the absolute workspace path (used by `fleet open` internally)       |
 | `fleet open <name>`                          | `cd` into a task workspace and launch VS Code (PowerShell only)           |
 | `fleet fleets list`                          | Show every configured fleet, mark default                                 |
-| `fleet fleets add <name> [--root PATH]`      | Register a fleet (defaults to current directory)                          |
+| `fleet fleets add <name> [--root PATH] [--force]` | Register a fleet (defaults to current directory; `--force` overwrites)    |
 | `fleet fleets default <name>`                | Switch the default fleet                                                  |
 | `fleet fleets remove <name>`                 | Unregister a fleet (no file deletion)                                     |
 
@@ -298,7 +301,7 @@ touches your shell state.
 | ----------------------- | ------------------------------------------------------------- | ------------------------------------------------ |
 | `FLEET_CONFIG_PATH`     | Override the global fleets index location                     | `%LOCALAPPDATA%\fleet\fleets.json` / `~/.config/fleet/fleets.json` |
 | `FLEET_TASKS_ROOT`      | Override the parent of `<fleet>/<task>/`                       | `C:\Tasks` (Windows) / `~/fleet-tasks` (other)   |
-| `FLEET_REPOS_ROOT`      | Force a specific repos root (skips upward `fleet.json` walk)  | (unset)                                          |
+| `FLEET_REPOS_ROOT`      | Escape hatch used only when no fleet is active (tests / scripts); ignored once a fleet has been resolved | (unset)                                          |
 
 | File                                     | What                                                |
 | ---------------------------------------- | --------------------------------------------------- |
