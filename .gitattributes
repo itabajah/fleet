@@ -1,0 +1,9 @@
+# Normalize line endings: let Git decide for text, but force LF where it matters.
+* text=auto
+
+# Shell scripts MUST stay LF — CRLF breaks the interpreter on Linux/macOS.
+*.sh text eol=lf
+
+# PowerShell is happy with either; keep CRLF on Windows-only scripts.
+*.psm1 text eol=crlf
+*.ps1  text eol=crlf
