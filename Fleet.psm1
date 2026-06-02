@@ -86,7 +86,7 @@ function Invoke-FleetPython {
     $oldPyPath = $env:PYTHONPATH
     try {
         Add-FleetSrcToPyPath
-        $py = Resolve-FleetPython
+        $py = @(Resolve-FleetPython)
         & $py[0] @($py | Select-Object -Skip 1) -m fleet @ArgList
         $global:LASTEXITCODE = $LASTEXITCODE
     }
@@ -104,7 +104,7 @@ function Invoke-FleetPythonCapture {
     $oldPyPath = $env:PYTHONPATH
     try {
         Add-FleetSrcToPyPath
-        $py = Resolve-FleetPython
+        $py = @(Resolve-FleetPython)
         $stdout = & $py[0] @($py | Select-Object -Skip 1) -m fleet @ArgList
         $exitCode = $LASTEXITCODE
     }
