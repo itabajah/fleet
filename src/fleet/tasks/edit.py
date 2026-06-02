@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 from fleet import git_ops
+from fleet.bundles_config import expand_bundle_tokens
 from fleet.console import yellow
 from fleet.discovery import RepoInfo, discover_repos
 from fleet.errors import FleetError
@@ -35,6 +36,9 @@ from fleet.tasks.worktree import add_worktree, prepare_canonical
 
 def _split_repo_tokens(raw: str) -> list[str]:
     tokens = [t.strip() for t in raw.split(",") if t.strip()]
+    if not tokens:
+        raise FleetError("--repos requires at least one repo name.")
+    tokens = expand_bundle_tokens(tokens)
     if not tokens:
         raise FleetError("--repos requires at least one repo name.")
     return tokens

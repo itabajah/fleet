@@ -23,7 +23,7 @@ import contextlib
 import sys
 from pathlib import Path
 
-from fleet import __version__, completion, fleets_commands, repos_command, scan, sync, tasks
+from fleet import __version__, bundles_commands, completion, fleets_commands, repos_command, scan, sync, tasks
 from fleet.console import dim, red
 from fleet.errors import FleetError
 from fleet.fleets_config import FleetsConfig
@@ -92,6 +92,7 @@ def build_parser() -> argparse.ArgumentParser:
     repos_command.register(subparsers, fleet_arg)
     task_sub = tasks.register(subparsers, fleet_arg)
     fleets_commands.register(subparsers, fleet_arg)
+    bundles_commands.register(subparsers, fleet_arg)
 
     # `fleet open` and `fleet task open` are PS-only. Stub them here so the
     # error message is a single concise line rather than argparse's

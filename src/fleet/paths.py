@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 REGISTRY_FILENAME = "fleet.json"
+BUNDLES_FILENAME = "bundles.json"
 
 # Directory names skipped during disk walks at every level. Restricted to
 # names that are unambiguously not (and never contain) a git checkout.

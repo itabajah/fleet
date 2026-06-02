@@ -126,3 +126,64 @@ def test_full_lifecycle_end_to_end(sandbox, tmp_path) -> None:
 
     r5 = _run("fleets", "remove", "smoke")
     assert r5.returncode == 0, r5.stderr
+
+
+def test_bundles_crud_end_to_end(sandbox, tmp_path) -> None:
+    """Register fleet -> bundles add/list/show/edit/remove + task new @bundle."""
+    repos_root = tmp_path / "src2"
+    repos_root.mkdir()
+    for name in ("alpha", "beta"):
+        d = repos_root / name
+        d.mkdir()
+        (d / ".git").write_text("gitdir: ./fake\n", encoding="utf-8")
+
+    assert _run("fleets", "add", "bsmoke",
+                "--root", str(repos_root)).returncode == 0
+    assert _run("scan", "-F", "bsmoke").returncode == 0
+
+    r_empty = _run("bundles", "list", "-F", "bsmoke")
+    assert r_empty.returncode == 0
+    assert "No bundles configured" in r_empty.stdout
+
+    r_add = _run("bundles", "add", "core",
+                 "--repos", "alpha,beta", "-F", "bsmoke")
+    assert r_add.returncode == 0, r_add.stderr
+    assert (repos_root / "bundles.json").is_file()
+
+    r_list = _run("bundles", "list", "-F", "bsmoke")
+    assert r_list.returncode == 0
+    assert "core" in r_list.stdout and "2 repo(s)" in r_list.stdout
+
+    r_show = _run("bundles", "show", "core", "-F", "bsmoke")
+    assert r_show.returncode == 0
+    assert "alpha" in r_show.stdout and "beta" in r_show.stdout
+
+    r_dup = _run("bundles", "add", "core",
+                 "--repos", "alpha", "-F", "bsmoke")
+    assert r_dup.returncode == 1
+    assert "already exists" in r_dup.stderr
+
+    r_edit = _run("bundles", "edit", "core",
+                  "--remove", "beta", "-F", "bsmoke")
+    assert r_edit.returncode == 0
+
+    # task new --repos @core should expand via the bundle.
+    r_new = _run("task", "new", "t-bundle", "--repos", "@core",
+                 "-F", "bsmoke", "--dry-run", "--no-pull")
+    assert r_new.returncode == 0, r_new.stderr
+    # After the edit, only alpha remains in the bundle.
+    assert "alpha" in r_new.stdout
+    assert "beta" not in r_new.stdout
+
+    r_unknown = _run("task", "new", "t-x", "--repos", "@nope",
+                     "-F", "bsmoke", "--dry-run", "--no-pull")
+    assert r_unknown.returncode == 1
+    assert "Unknown bundle" in r_unknown.stderr
+
+    r_rm = _run("bundles", "remove", "core", "-F", "bsmoke")
+    assert r_rm.returncode == 0
+    assert _run("bundles", "list", "-F", "bsmoke").stdout.count(
+        "No bundles configured"
+    ) == 1
+
+    assert _run("fleets", "remove", "bsmoke").returncode == 0

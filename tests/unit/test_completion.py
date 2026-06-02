@@ -343,3 +343,78 @@ class TestEditSubcommandRepoFiltering:
         for sub in ("add-repo", "remove-repo", "rename", "edit"):
             assert _candidates("task", sub, "") == ["t1", "t2"], sub
 
+
+class TestBundlesCompletion:
+    """Bundle name positional + @bundle refs in --repos + bundles edit CSV."""
+
+    def test_bundles_subcommands(self) -> None:
+        cands = _candidates("bundles", "")
+        for n in ("add", "list", "show", "remove", "edit"):
+            assert n in cands
+
+    def test_bundles_show_positional_lists_bundle_names(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            completion, "_bundle_names", lambda _w: ["core", "frontend"],
+        )
+        for sub in ("show", "remove", "edit"):
+            assert _candidates("bundles", sub, "") == ["core", "frontend"]
+
+    def test_repos_includes_at_bundle_refs(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            completion, "_repo_names", lambda _w: ["alpha", "beta"],
+        )
+        monkeypatch.setattr(
+            completion, "_bundle_names", lambda _w: ["core"],
+        )
+        directive, cands = _complete("task", "new", "t", "--repos", "")
+        assert directive == completion.DIRECTIVE_NOSPACE
+        assert "alpha" in cands
+        assert "@core" in cands
+
+    def test_repos_prefix_at_filters_to_bundles(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            completion, "_repo_names", lambda _w: ["alpha"],
+        )
+        monkeypatch.setattr(
+            completion, "_bundle_names", lambda _w: ["core", "frontend"],
+        )
+        _, cands = _complete("task", "new", "t", "--repos", "@")
+        assert set(cands) == {"@core", "@frontend"}
+
+    def test_bundles_edit_add_excludes_current_members(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            completion, "_repo_names",
+            lambda _w: ["alpha", "beta", "gamma"],
+        )
+        monkeypatch.setattr(
+            completion, "_bundle_members",
+            lambda _w, _anchor: ["alpha"],
+        )
+        directive, cands = _complete(
+            "bundles", "edit", "core", "--add", "",
+        )
+        assert directive == completion.DIRECTIVE_NOSPACE
+        assert "alpha" not in cands
+        assert "beta" in cands and "gamma" in cands
+
+    def test_bundles_edit_remove_offers_only_members(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            completion, "_bundle_members",
+            lambda _w, _anchor: ["alpha", "beta"],
+        )
+        directive, cands = _complete(
+            "bundles", "edit", "core", "--remove", "",
+        )
+        assert directive == completion.DIRECTIVE_NOSPACE
+        assert set(cands) == {"alpha", "beta"}
+

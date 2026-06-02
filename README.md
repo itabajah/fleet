@@ -127,6 +127,11 @@ That's the entire happy path.
 | `fleet fleets add <name> [--root PATH] [--force]` | Register a fleet (defaults to current directory; `--force` overwrites)    |
 | `fleet fleets default <name>`                | Switch the default fleet                                                  |
 | `fleet fleets remove <name>`                 | Unregister a fleet (no file deletion)                                     |
+| `fleet bundles add <name> --repos a,b[,grp/c] [--force]` | Save a named, ordered repo list (per-fleet)                |
+| `fleet bundles list`                         | List every bundle in the active fleet                                     |
+| `fleet bundles show <name>`                  | Print a bundle's members, marking any that no longer resolve              |
+| `fleet bundles edit <name> [--add a,b] [--remove c]` | Append and/or drop tokens in an existing bundle                   |
+| `fleet bundles remove <name>`                | Delete a bundle (config only — no git/worktree changes)                   |
 
 **Per-command override.** Add `-F NAME` (or `--fleet NAME`) to any
 fleet-aware command to use a non-default fleet for that invocation only:
@@ -228,6 +233,39 @@ Tasks can also be edited in place without ending and recreating them:
   `--description-file PATH`, `-` for stdin) updates the manifest's
   description and the `## Description` section of `context.md`.
 
+### Bundles
+
+A *bundle* is a named, ordered list of repo tokens (anything
+`fleet task new --repos` accepts: bare leaves or `group/path/name`).
+Bundles are **per-fleet** — same name in two fleets is independent. They
+live in `<fleet-root>/bundles.json`:
+
+```json
+{
+  "bundles": {
+    "core": ["alpha", "group/gamma"],
+    "frontend": ["beta"]
+  }
+}
+```
+
+Reference a bundle anywhere `--repos` is accepted with the `@name`
+sigil. It expands inline and can be mixed freely with raw repo tokens:
+
+```powershell
+fleet bundles add core --repos alpha,group/gamma
+fleet task new bug-42  --repos @core,extra-repo
+fleet task add-repo bug-42 --repos @frontend
+fleet task remove-repo bug-42 --repos @core
+```
+
+Members are stored verbatim — if a repo is later disabled in
+`fleet.json` or no longer exists on disk, `fleet bundles show` marks it
+`[missing]` and `task new` raises a clear `Unknown repo` error at
+consumption (before any worktree is created). Bundles cannot contain
+other bundles (`@`-tokens are rejected at write time), so circular
+references are structurally impossible.
+
 ### `fleet open` (shell integration)
 
 `fleet open <task>` resolves the path via `fleet task path <task>`,
@@ -291,6 +329,8 @@ fleet/
     ├── state.py               # active-fleet state + derived paths
     ├── sync.py                # `fleet sync` (parallel runner)
     ├── walker.py              # shared disk walker
+    ├── bundles_config.py      # per-fleet bundles.json (load/save/expand)
+    ├── bundles_commands.py    # `fleet bundles ...` handlers
     └── tasks/                 # `fleet task ...` (manifest, lifecycle, inspect, validation)
 ```
 
@@ -372,6 +412,7 @@ Invoke-Expression (& fleet completion powershell | Out-String)
 | File                                     | What                                                |
 | ---------------------------------------- | --------------------------------------------------- |
 | `<fleet-root>/fleet.json`                | Per-fleet enable/exclude registry                   |
+| `<fleet-root>/bundles.json`              | Per-fleet repo bundles (named `--repos` aliases)    |
 | `<FLEET_CONFIG_PATH>`                    | Global named-fleets index                           |
 | `<FLEET_TASKS_ROOT>/<fleet>/<task>/`     | Active task workspace                               |
 | `<FLEET_TASKS_ROOT>/<fleet>/_archive/`   | Archived tasks (one zip per `task end`)             |

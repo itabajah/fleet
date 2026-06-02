@@ -15,7 +15,8 @@ def test_top_level_subcommands() -> None:
     sub_action = next(a for a in parser._actions
                       if isinstance(a, argparse._SubParsersAction))
     assert set(sub_action.choices) == {
-        "sync", "scan", "repos", "task", "fleets", "open", "completion",
+        "sync", "scan", "repos", "task", "fleets", "bundles",
+        "open", "completion",
     }
 
 

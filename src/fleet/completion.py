@@ -173,7 +173,7 @@ def _task_name_after(words: Sequence[str], anchor: str) -> str | None:
                 j += 1
                 continue
             if w in ("-F", "--fleet", "--repos", "--description",
-                     "--description-file", "-d"):
+                     "--description-file", "-d", "--add", "--remove"):
                 j += 2
                 continue
             j += 1
@@ -217,6 +217,44 @@ def _repo_names_in_task(words: Sequence[str]) -> list[str]:
     return sorted(_manifest_repo_names(words, "remove-repo"))
 
 
+def _bundle_names(words: Sequence[str]) -> list[str]:
+    if not _activate_fleet_from_words(words):
+        return []
+    try:
+        from fleet.bundles_config import BundlesConfig
+        return BundlesConfig.load().names()
+    except Exception:
+        return []
+
+
+def _bundle_refs(words: Sequence[str]) -> list[str]:
+    """Bundle names prefixed with ``@`` for inclusion in --repos."""
+    return [f"@{n}" for n in _bundle_names(words)]
+
+
+def _bundle_members(words: Sequence[str], anchor: str) -> list[str]:
+    """Members of the bundle named after ``anchor`` in ``words``."""
+    name = _task_name_after(words, anchor)
+    if not name:
+        return []
+    if not _activate_fleet_from_words(words):
+        return []
+    try:
+        from fleet.bundles_config import BundlesConfig
+        return BundlesConfig.load().bundles.get(name, [])
+    except Exception:
+        return []
+
+
+def _bundle_repos_not_in_bundle(words: Sequence[str]) -> list[str]:
+    members = set(_bundle_members(words, "edit"))
+    return [r for r in _repo_names(words) if r not in members]
+
+
+def _bundle_repos_in_bundle(words: Sequence[str]) -> list[str]:
+    return sorted(_bundle_members(words, "edit"))
+
+
 ValueProvider = Callable[[Sequence[str]], list[str]]
 
 # Positional value providers keyed by command-path tuple (subcommand chain).
@@ -235,6 +273,9 @@ POS_PROVIDERS: dict[tuple[str, ...], ValueProvider] = {
     ("open",): lambda w: _task_names(w),
     ("fleets", "default"): lambda w: _fleet_names(w),
     ("fleets", "remove"): lambda w: _fleet_names(w),
+    ("bundles", "show"): lambda w: _bundle_names(w),
+    ("bundles", "remove"): lambda w: _bundle_names(w),
+    ("bundles", "edit"): lambda w: _bundle_names(w),
 }
 
 # Option value providers keyed by option string. Applies on any subcommand
@@ -296,6 +337,26 @@ def _complete_option_value(
         cands = sorted(str(c) for c in action.choices)
         return DIRECTIVE_DEFAULT, _filter_prefix(cands, current)
 
+    # ``bundles edit --add/--remove`` are comma-separated repo-token lists
+    # scoped to the named bundle. Handled here (rather than via
+    # OPT_PROVIDERS) so the ``--add``/``--remove`` option names don't leak
+    # generic repo-name completion onto any future unrelated subcommand
+    # that happens to use the same flag spelling.
+    if (
+        "bundles" in words and "edit" in words
+        and any(s in ("--add", "--remove") for s in action.option_strings)
+    ):
+        if "--add" in action.option_strings:
+            provider = _bundle_repos_not_in_bundle
+        else:
+            provider = _bundle_repos_in_bundle
+        head, sep, tail = current.rpartition(",")
+        prefix = f"{head}{sep}" if sep else ""
+        already = set(filter(None, head.split(","))) if sep else set()
+        filtered = [r for r in provider(words)
+                    if r not in already and r.startswith(tail)]
+        return DIRECTIVE_NOSPACE, [f"{prefix}{r}" for r in filtered]
+
     provider: ValueProvider | None = None
     for s in action.option_strings:
         if s in OPT_PROVIDERS:
@@ -307,7 +368,9 @@ def _complete_option_value(
     # --repos is comma-separated: complete the trailing segment, preserve the
     # head, request nospace so the user can keep adding commas. Subcommand
     # context picks the right candidate set: add-repo excludes current
-    # members, remove-repo restricts to current members.
+    # members, remove-repo restricts to current members. ``@bundle`` refs
+    # are always offered alongside raw repo names so users discover
+    # bundles inline.
     if "--repos" in action.option_strings:
         if "add-repo" in words:
             provider = _repo_names_not_in_task
@@ -316,8 +379,8 @@ def _complete_option_value(
         head, sep, tail = current.rpartition(",")
         prefix = f"{head}{sep}" if sep else ""
         already = set(filter(None, head.split(","))) if sep else set()
-        all_repos = provider(words)
-        filtered = [r for r in all_repos
+        all_cands = list(provider(words)) + _bundle_refs(words)
+        filtered = [r for r in all_cands
                     if r not in already and r.startswith(tail)]
         return DIRECTIVE_NOSPACE, [f"{prefix}{r}" for r in filtered]
 

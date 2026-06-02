@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fleet import git_ops
+from fleet.bundles_config import expand_bundle_tokens
 from fleet.console import yellow
 from fleet.discovery import RepoInfo, discover_repos
 from fleet.errors import FleetError
@@ -37,6 +38,9 @@ def cmd_new(args: argparse.Namespace) -> int:
         )
 
     repo_tokens = [t.strip() for t in args.repos.split(",") if t.strip()]
+    if not repo_tokens:
+        raise FleetError("--repos requires at least one repo name.")
+    repo_tokens = expand_bundle_tokens(repo_tokens)
     if not repo_tokens:
         raise FleetError("--repos requires at least one repo name.")
 

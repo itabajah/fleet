@@ -17,7 +17,7 @@ import os
 from pathlib import Path
 
 from fleet.errors import FleetError
-from fleet.paths import REGISTRY_FILENAME, tasks_root_base
+from fleet.paths import BUNDLES_FILENAME, REGISTRY_FILENAME, tasks_root_base
 
 _repos_root: Path | None = None
 _active_fleet_name: str | None = None
@@ -92,6 +92,11 @@ def find_repos_root() -> Path:
 def registry_path() -> Path:
     """Path to the active fleet's ``fleet.json``."""
     return find_repos_root() / REGISTRY_FILENAME
+
+
+def bundles_path() -> Path:
+    """Path to the active fleet's ``bundles.json``."""
+    return find_repos_root() / BUNDLES_FILENAME
 
 
 def load_registry() -> dict:

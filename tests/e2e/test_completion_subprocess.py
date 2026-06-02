@@ -103,6 +103,61 @@ def test_completion_rejects_unknown_shell(fleet_env_sandbox: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Bundles completion (subprocess)
+# ---------------------------------------------------------------------------
+
+def test_complete_bundles_subcommands(fleet_env_sandbox: Path) -> None:
+    r = _run("__complete", "--", "bundles", "")
+    assert r.returncode == 0, r.stderr
+    lines = r.stdout.splitlines()
+    assert lines[0] == ":0"
+    for n in ("add", "list", "show", "remove", "edit"):
+        assert n in lines
+
+
+def test_complete_bundles_show_lists_bundles(
+    fleet_env_sandbox: Path, tmp_path: Path,
+) -> None:
+    """End-to-end: register a fleet, scan, add a bundle, complete `bundles show`."""
+    repos_root = tmp_path / "src_complete"
+    repos_root.mkdir()
+    for name in ("alpha", "beta"):
+        d = repos_root / name
+        d.mkdir()
+        (d / ".git").write_text("gitdir: ./fake\n", encoding="utf-8")
+    assert _run("fleets", "add", "compcomp",
+                "--root", str(repos_root)).returncode == 0
+    assert _run("scan", "-F", "compcomp").returncode == 0
+    assert _run("bundles", "add", "core", "--repos", "alpha,beta",
+                "-F", "compcomp").returncode == 0
+
+    r = _run("__complete", "--", "bundles", "show", "")
+    assert r.returncode == 0, r.stderr
+    lines = r.stdout.splitlines()
+    assert lines[0] == ":0"
+    assert "core" in lines
+
+    # `task new --repos <TAB>` exposes both raw repo names and @bundle refs.
+    r2 = _run("__complete", "--", "task", "new", "t",
+              "-F", "compcomp", "--repos", "")
+    assert r2.returncode == 0, r2.stderr
+    lines2 = r2.stdout.splitlines()
+    assert lines2[0] == ":4"  # DIRECTIVE_NOSPACE
+    assert "@core" in lines2
+
+    # `bundles edit core --add` excludes current members.
+    r3 = _run("__complete", "--", "bundles", "edit", "core",
+              "-F", "compcomp", "--add", "")
+    assert r3.returncode == 0, r3.stderr
+    lines3 = r3.stdout.splitlines()
+    assert lines3[0] == ":4"
+    assert "alpha" not in lines3
+    assert "beta" not in lines3
+
+    _run("fleets", "remove", "compcomp")
+
+
+# ---------------------------------------------------------------------------
 # Rendered scripts pass `bash -n` (syntax check)
 # ---------------------------------------------------------------------------
 
