@@ -6,23 +6,40 @@
 Register-ArgumentCompleter -Native -CommandName fleet -ScriptBlock {
     param($wordToComplete, $commandAst, $cursorPosition)
 
-    # Extract every token after `fleet`. CommandElements[0] is the command
-    # itself (the `fleet` function); the rest are user-typed words.
-    $elements = @($commandAst.CommandElements)
-    if ($elements.Count -ge 1) {
-        $tokens = @($elements[1..($elements.Count - 1)] | ForEach-Object { $_.Extent.Text })
+    # Reconstruct the literal source typed after `fleet ` up to the cursor.
+    # We deliberately do NOT use $commandAst.CommandElements: PowerShell's
+    # parser eagerly turns `a,b,c` into an ArrayLiteralExpression, which
+    # would destroy the comma-separated value of `--repos`. Extent.Text
+    # preserves the exact characters the user typed, commas included.
+    $extent = $commandAst.Extent
+    $maxLen = $extent.Text.Length
+    $rel = [Math]::Max(0, [Math]::Min($cursorPosition - $extent.StartOffset, $maxLen))
+    $line = $extent.Text.Substring(0, $rel)
+
+    # Strip the leading command name (`fleet`) plus its trailing whitespace.
+    $firstSpace = $line.IndexOf(' ')
+    if ($firstSpace -lt 0) {
+        $payload = ''
     } else {
+        $payload = $line.Substring($firstSpace + 1)
+    }
+
+    # Tokenize on whitespace runs. Commas stay inside tokens — which is
+    # exactly what we want for `--repos a,b,c<TAB>`.
+    if ([string]::IsNullOrEmpty($payload)) {
         $tokens = @()
+    } else {
+        $tokens = @($payload -split '\s+' | Where-Object { $_ -ne '' })
     }
 
-    # Ensure the last token IS the current partial — when the cursor is on a
-    # fresh word (after a space), $wordToComplete is '' and is not in $tokens.
-    if ($tokens.Count -eq 0 -or $tokens[-1] -ne $wordToComplete) {
-        $tokens = $tokens + $wordToComplete
+    # If the line ends with whitespace (or is empty), the cursor is on a
+    # fresh word — make sure the engine sees an empty trailing token.
+    if ([string]::IsNullOrEmpty($payload) -or $payload[$payload.Length - 1] -match '\s') {
+        $tokens = @($tokens) + ''
     }
 
-    $payload = @('__complete', '--') + $tokens
-    $raw = & fleet @payload 2>$null
+    $invokeArgs = @('__complete', '--') + $tokens
+    $raw = & fleet @invokeArgs 2>$null
     if (-not $raw) { return }
 
     $lines = @($raw | ForEach-Object { $_.ToString() })

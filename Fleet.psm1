@@ -17,6 +17,28 @@
 $script:FleetSrc = Join-Path $PSScriptRoot 'src'
 $script:FleetPython = $null
 
+function _Flatten-FleetArgs {
+    # PowerShell's `,` is the array-construction operator, so command lines
+    # like `fleet ... --repos a,b,c` arrive with `a,b,c` as a NESTED array
+    # element inside $Rest. If $Rest were typed `[string[]]`, the coercion
+    # would join the inner array with $OFS (space) and we'd silently lose
+    # the comma structure — argparse would then see `--repos "a b c"`. To
+    # avoid that, callers type $Rest as `[object[]]` and pass it through
+    # this flattener, which re-joins any nested array with commas.
+    param([object[]]$ArgList)
+    $out = New-Object 'System.Collections.Generic.List[string]'
+    if (-not $ArgList) { return [string[]]$out.ToArray() }
+    foreach ($a in $ArgList) {
+        if ($null -eq $a) { continue }
+        if ($a -is [System.Collections.IEnumerable] -and $a -isnot [string]) {
+            $out.Add(($a -join ',')) | Out-Null
+        } else {
+            $out.Add([string]$a) | Out-Null
+        }
+    }
+    return [string[]]$out.ToArray()
+}
+
 function Resolve-FleetPython {
     # Resolve the Python launcher to use, once per session. Prefers `python`
     # then `python3` then the Windows `py -3` launcher. Cached so we don't
@@ -59,8 +81,11 @@ function fleet {
         [Parameter(Position = 0)]
         [string]$Command,
 
+        # Typed as [object[]] (not [string[]]) so PowerShell preserves
+        # nested array literals from `a,b,c` instead of space-joining them.
+        # _Flatten-FleetArgs re-joins those nested arrays with commas.
         [Parameter(ValueFromRemainingArguments = $true)]
-        [string[]]$Rest
+        [object[]]$Rest
     )
 
     if ([string]::IsNullOrWhiteSpace($Command)) {
@@ -68,15 +93,17 @@ function fleet {
         return
     }
 
+    $rest = _Flatten-FleetArgs $Rest
+
     # `open` and `task open` need to mutate the parent shell — handle locally.
     if ($Command -eq 'open') {
-        return Invoke-FleetOpen -Rest $Rest
+        return Invoke-FleetOpen -Rest $rest
     }
-    if ($Command -eq 'task' -and $Rest -and $Rest.Count -ge 1 -and $Rest[0] -eq 'open') {
-        return Invoke-FleetOpen -Rest ($Rest | Select-Object -Skip 1)
+    if ($Command -eq 'task' -and $rest -and $rest.Count -ge 1 -and $rest[0] -eq 'open') {
+        return Invoke-FleetOpen -Rest ([string[]](@($rest) | Select-Object -Skip 1))
     }
 
-    $argList = @($Command) + (@($Rest) | Where-Object { $_ -ne $null })
+    $argList = @($Command) + @($rest)
     Invoke-FleetPython $argList
 }
 
