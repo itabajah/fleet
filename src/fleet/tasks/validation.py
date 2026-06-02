@@ -92,3 +92,34 @@ def resolve_repo(token: str, all_repos: list[RepoInfo]) -> RepoInfo:
             f"as a task target."
         )
     return chosen
+
+
+def require_repo_in_task(token: str, manifest) -> "object":  # noqa: ANN001
+    """Resolve a ``--repos`` token to an entry of ``manifest.repos``.
+
+    Accepts a bare leaf name or ``group/path/name``. Raises
+    :class:`FleetError` listing current members on miss.
+    """
+    norm = token.replace("\\", "/").strip("/")
+    by_disp = {r.display_name: r for r in manifest.repos}
+    by_name: dict[str, list] = {}
+    for r in manifest.repos:
+        by_name.setdefault(r.name, []).append(r)
+
+    if norm in by_disp:
+        return by_disp[norm]
+    if "/" not in norm:
+        cands = by_name.get(norm, [])
+        if len(cands) == 1:
+            return cands[0]
+        if len(cands) > 1:
+            disambig = ", ".join(c.display_name for c in cands)
+            raise FleetError(
+                f"Ambiguous repo '{token}' in task '{manifest.name}' — "
+                f"matches: {disambig}"
+            )
+    members = ", ".join(sorted(by_disp)) or "(none)"
+    raise FleetError(
+        f"Repo '{token}' is not in task '{manifest.name}'. "
+        f"Members: {members}."
+    )

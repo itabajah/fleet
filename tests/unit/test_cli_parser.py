@@ -28,6 +28,7 @@ def test_task_subcommands() -> None:
                     if isinstance(a, argparse._SubParsersAction))
     assert set(task_sub.choices) == {
         "new", "list", "info", "sync", "end", "path", "open",
+        "add-repo", "remove-repo", "rename", "edit",
     }
 
 

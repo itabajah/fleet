@@ -264,6 +264,28 @@ def checkout(repo_path: Path, branch: str) -> GitResult:
     return run_git("checkout", branch, cwd=repo_path, check=False)
 
 
+def rename_branch(repo_path: Path, old: str, new: str) -> GitResult:
+    """``git branch -m <old> <new>`` in ``repo_path``. Never raises.
+
+    Used by ``fleet task rename`` to retarget the per-fleet task branch in
+    each canonical repo. Caller inspects ``.ok``/``stderr`` to decide
+    whether to roll back (a missing old branch usually means a prior
+    rename completed past this canonical — see ``task rename`` recovery).
+    """
+    return run_git("branch", "-m", old, new, cwd=repo_path, check=False)
+
+
+def worktree_repair(canonical: Path, worktree_path: Path) -> GitResult:
+    """``git worktree repair <worktree_path>`` from the canonical.
+
+    Required after manually moving a worktree directory: it updates the
+    canonical's ``.git/worktrees/<leaf>/gitdir`` so ``git worktree
+    remove`` / ``prune`` / ``list`` resolve the new location.
+    """
+    return run_git("worktree", "repair", str(worktree_path),
+                   cwd=canonical, check=False)
+
+
 def ls_remote_head(repo_path: Path) -> GitResult:
     """`git ls-remote --exit-code origin HEAD` — used as the auth probe."""
     return run_git("ls-remote", "--exit-code", "origin", "HEAD",

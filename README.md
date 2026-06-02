@@ -112,6 +112,10 @@ That's the entire happy path.
 | `fleet task new <name> --repos a,b[,grp/c]`  | Create a task workspace with worktrees                                    |
 | `fleet task new ... --no-pull`               | Skip fetch + pull on each canonical repo (offline-safe; local refs only)  |
 | `fleet task new ... --dry-run`               | Validate inputs and print the plan without creating anything              |
+| `fleet task add-repo <name> --repos a,b`     | Add one or more repos (new worktrees) to an existing task                 |
+| `fleet task remove-repo <name> --repos a,b [--force]` | Remove repos and tear down their worktrees (`--force` over dirty/unpushed) |
+| `fleet task rename <old> <new>`              | Rename a task: rename branch in every canonical + move workspace dir       |
+| `fleet task edit <name> --description TEXT`  | Update the task's description in `task.json` (and `context.md`)            |
 | `fleet task list [--quick]`                  | List active task workspaces (`--quick` skips dirty/unpushed checks)       |
 | `fleet task list --json`                     | Emit one JSON object per line on stdout (implies `--quick`)               |
 | `fleet task info <name>`                     | Detailed status of one task                                               |
@@ -208,6 +212,21 @@ Each task gets:
 `<TASKS_ROOT>/<fleet>/_archive/<task>-<timestamp>.zip`, then removes
 every worktree and the workspace folder. Use `--force` to tear down
 through dirty worktrees.
+
+Tasks can also be edited in place without ending and recreating them:
+
+- `fleet task add-repo <name> --repos foo` adds a fresh worktree on the
+  existing `task/<fleet>/<name>` branch and appends it to `task.json`.
+- `fleet task remove-repo <name> --repos foo` tears down that repo's
+  worktree (refuses on dirty/unpushed unless `--force`) and drops it
+  from the manifest.
+- `fleet task rename <old> <new>` renames the git branch in every
+  canonical (`git branch -m`), moves the workspace directory, and
+  rewrites `task.json` + the `context.md` header. If you were `cd`'d
+  inside the old workspace, `cd` to the new path afterwards.
+- `fleet task edit <name> --description TEXT` (or
+  `--description-file PATH`, `-` for stdin) updates the manifest's
+  description and the `## Description` section of `context.md`.
 
 ### `fleet open` (shell integration)
 

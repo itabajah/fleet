@@ -191,3 +191,40 @@ class Manifest:
         # Keep file paths as strings in serialised form.
         d["repos"] = [r.to_dict() for r in self.repos]
         return d
+
+    # ------------------------------ mutations --------------------------------
+    # All mutations are in-memory; callers invoke ``save()`` to persist
+    # atomically. Keeping I/O in one place preserves the tmp+os.replace
+    # invariant.
+
+    def add_repos(self, entries: list[RepoEntry]) -> None:
+        """Append ``entries`` to ``self.repos``. Caller must ``save()``."""
+        self.repos.extend(entries)
+
+    def remove_repos(self, names: set[str]) -> list[RepoEntry]:
+        """Drop and return entries whose ``name`` is in ``names``."""
+        removed: list[RepoEntry] = []
+        kept: list[RepoEntry] = []
+        for r in self.repos:
+            if r.name in names:
+                removed.append(r)
+            else:
+                kept.append(r)
+        self.repos = kept
+        return removed
+
+    def rename(self, new_name: str, new_branch: str,
+               new_workspace: Path) -> None:
+        """Repoint name/branch and every ``worktree_path`` under ``new_workspace``."""
+        self.name = new_name
+        self.branch = new_branch
+        self.repos = [
+            RepoEntry(
+                name=r.name,
+                group=r.group,
+                canonical_path=r.canonical_path,
+                worktree_path=new_workspace / r.name,
+            )
+            for r in self.repos
+        ]
+

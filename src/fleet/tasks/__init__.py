@@ -18,10 +18,14 @@ from __future__ import annotations
 
 import argparse
 
+from fleet.tasks.edit import cmd_add_repo, cmd_edit, cmd_remove_repo, cmd_rename
 from fleet.tasks.inspect import cmd_info, cmd_list, cmd_path, cmd_sync
 from fleet.tasks.lifecycle import cmd_end, cmd_new
 
-__all__ = ["cmd_new", "cmd_list", "cmd_info", "cmd_sync", "cmd_end", "cmd_path"]
+__all__ = [
+    "cmd_new", "cmd_list", "cmd_info", "cmd_sync", "cmd_end", "cmd_path",
+    "cmd_add_repo", "cmd_remove_repo", "cmd_rename", "cmd_edit",
+]
 
 
 def register(subparsers: argparse._SubParsersAction,
@@ -91,6 +95,58 @@ def register(subparsers: argparse._SubParsersAction,
     s_end.add_argument("--force", action="store_true",
                        help="proceed even if a worktree is dirty")
     s_end.set_defaults(func=cmd_end)
+
+    # task add-repo
+    s_add = sub.add_parser(
+        "add-repo", parents=[fleet_arg],
+        help="add one or more repos (new worktrees) to an existing task",
+    )
+    s_add.add_argument("name", help="task name")
+    s_add.add_argument("--repos", required=True,
+                       help="comma-separated repo names "
+                            "(use group/path/name to disambiguate)")
+    s_add.add_argument("--no-pull", action="store_true",
+                       help="skip fetch + pull on each canonical repo")
+    s_add.add_argument("--dry-run", action="store_true",
+                       help="validate inputs and print the plan without "
+                            "creating anything")
+    s_add.set_defaults(func=cmd_add_repo)
+
+    # task remove-repo
+    s_rm = sub.add_parser(
+        "remove-repo", parents=[fleet_arg],
+        help="remove one or more repos (tear down worktrees) from a task",
+    )
+    s_rm.add_argument("name", help="task name")
+    s_rm.add_argument("--repos", required=True,
+                     help="comma-separated repo names currently in the task")
+    s_rm.add_argument("--force", action="store_true",
+                     help="proceed even if a worktree is dirty / unpushed")
+    s_rm.add_argument("--dry-run", action="store_true",
+                     help="print the plan without removing anything")
+    s_rm.set_defaults(func=cmd_remove_repo)
+
+    # task rename
+    s_ren = sub.add_parser(
+        "rename", parents=[fleet_arg],
+        help="rename a task: move workspace + rename branch in every canonical",
+    )
+    s_ren.add_argument("old", help="current task name")
+    s_ren.add_argument("new", help="new task name")
+    s_ren.set_defaults(func=cmd_rename)
+
+    # task edit
+    s_edit = sub.add_parser(
+        "edit", parents=[fleet_arg],
+        help="update a task's description in task.json (and context.md)",
+    )
+    s_edit.add_argument("name", help="task name")
+    grp = s_edit.add_mutually_exclusive_group()
+    grp.add_argument("--description", "-d", default=None,
+                     help="new description text")
+    grp.add_argument("--description-file", default=None, metavar="PATH",
+                     help="read description from PATH (use '-' for stdin)")
+    s_edit.set_defaults(func=cmd_edit)
 
     # task path  (prints absolute workspace path; used by `fleet open`)
     s_path = sub.add_parser(

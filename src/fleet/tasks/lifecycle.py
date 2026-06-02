@@ -17,111 +17,7 @@ from fleet.errors import FleetError
 from fleet.state import archive_root, tasks_root
 from fleet.tasks.manifest import Manifest, RepoEntry, now_iso
 from fleet.tasks.validation import resolve_repo, task_branch, validate_task_name
-
-# ---------------------------------------------------------------------------
-# Per-repo task setup helpers
-# ---------------------------------------------------------------------------
-
-def _prepare_canonical(repo: RepoInfo, no_pull: bool) -> str:
-    """Fetch (and FF-pull when safe) the canonical repo. Return default branch.
-
-    With ``no_pull=True`` we skip both the network fetch and the local pull,
-    and use the offline-only default-branch detector so we don't surprise
-    the user with a hidden network round-trip.
-    """
-    label = f"[{repo.name}]"
-
-    if no_pull:
-        default = git_ops.detect_default_branch(repo.path, offline=True)
-        print(f"  {label} default branch: {default} (skipping fetch + pull)")
-        return default
-
-    print(f"  {label} fetching...")
-    fetch = git_ops.fetch_prune(repo.path)
-    if not fetch.ok and not git_ops.is_warning_only(fetch):
-        print(f"  {label} WARN: fetch failed:\n    {fetch.stderr.strip()}\n"
-              f"    (continuing with whatever origin/* is cached)")
-
-    default = git_ops.detect_default_branch(repo.path)
-
-    if git_ops.is_dirty(repo.path):
-        print(f"  {label} canonical has local changes; "
-              f"skipping local pull (worktree will branch from origin/{default})")
-        return default
-
-    cur = git_ops.current_branch(repo.path)
-    if cur == default:
-        pull = git_ops.pull_ff_only(repo.path, default)
-        if pull.ok or git_ops.is_warning_only(pull):
-            print(f"  {label} pulled latest on {default}")
-        else:
-            print(f"  {label} WARN: pull --ff-only failed:\n    "
-                  f"{pull.stderr.strip()}\n"
-                  f"    (worktree will branch from origin/{default})")
-    else:
-        # Update the local default ref to match origin without checking out.
-        upd = git_ops.run_git("fetch", "origin", f"{default}:{default}",
-                              cwd=repo.path, check=False)
-        if upd.ok:
-            print(f"  {label} updated local {default} from origin")
-        else:
-            print(f"  {label} WARN: could not fast-forward local {default}:\n"
-                  f"    {upd.stderr.strip()}\n"
-                  f"    (worktree will branch from origin/{default})")
-    return default
-
-
-def _add_worktree(repo: RepoInfo, name: str, default_branch: str,
-                  task_workspace: Path) -> Path:
-    """Create a worktree for ``repo`` under the task workspace. Returns its path."""
-    branch = task_branch(name)
-    wt_path = task_workspace / repo.name
-    label = f"[{repo.name}]"
-
-    if wt_path.exists():
-        raise FleetError(f"Worktree path already exists: {wt_path}")
-
-    existing = git_ops.run_git(
-        "show-ref", "--verify", "--quiet", f"refs/heads/{branch}",
-        cwd=repo.path, check=False,
-    )
-    if existing.ok:
-        raise FleetError(
-            f"Branch '{branch}' already exists in {repo.name}. "
-            f"Pick a different task name or delete the branch with "
-            f"`git -C \"{repo.path}\" branch -D {branch}`."
-        )
-
-    # Also reject if the branch already exists on origin (e.g. a previous
-    # task with the same name was pushed before being ended). Otherwise we'd
-    # create a fresh local branch from origin/<default> that diverges from
-    # the remote one and the first non-force push would be rejected.
-    origin_existing = git_ops.run_git(
-        "show-ref", "--verify", "--quiet",
-        f"refs/remotes/origin/{branch}",
-        cwd=repo.path, check=False,
-    )
-    if origin_existing.ok:
-        raise FleetError(
-            f"Branch '{branch}' already exists on origin in {repo.name}. "
-            f"Pick a different task name, or delete it from origin first "
-            f"with `git -C \"{repo.path}\" push origin --delete {branch}`."
-        )
-
-    # `--no-track` is critical: without it, branching from `origin/<default>`
-    # silently sets the new branch's upstream to `origin/<default>`. That
-    # means the first plain `git push` either errors confusingly
-    # (push.default = simple) or, worse, pushes to the default branch on
-    # origin (push.default = upstream). With `--no-track`, the user must
-    # explicitly `git push -u origin <branch>` the first time — which is
-    # what we want.
-    git_ops.run_git(
-        "worktree", "add", "--no-track", str(wt_path),
-        "-b", branch, f"origin/{default_branch}",
-        cwd=repo.path,
-    )
-    print(f"  {label} worktree -> {wt_path} (branch {branch})")
-    return wt_path
+from fleet.tasks.worktree import add_worktree, prepare_canonical
 
 
 # ---------------------------------------------------------------------------
@@ -201,8 +97,8 @@ def cmd_new(args: argparse.Namespace) -> int:
     created_worktrees: list[tuple[RepoInfo, Path, str]] = []
     try:
         for repo in chosen:
-            default = _prepare_canonical(repo, no_pull=args.no_pull)
-            wt = _add_worktree(repo, name, default, workspace)
+            default = prepare_canonical(repo, no_pull=args.no_pull)
+            wt, _branch_is_new = add_worktree(repo, name, default, workspace)
             created_worktrees.append((repo, wt, branch))
 
         context_md = workspace / "context.md"

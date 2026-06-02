@@ -158,6 +158,65 @@ def _repo_names(words: Sequence[str]) -> list[str]:
         return []
 
 
+def _task_name_after(words: Sequence[str], anchor: str) -> str | None:
+    """Find the first non-flag token after ``anchor`` (e.g. 'add-repo')."""
+    try:
+        i = words.index(anchor)
+    except ValueError:
+        return None
+    j = i + 1
+    while j < len(words) - 1:  # last is the current partial
+        w = words[j]
+        if w.startswith("-"):
+            # Skip the flag, and its value if it takes one.
+            if "=" in w:
+                j += 1
+                continue
+            if w in ("-F", "--fleet", "--repos", "--description",
+                     "--description-file", "-d"):
+                j += 2
+                continue
+            j += 1
+            continue
+        return w
+    return None
+
+
+def _manifest_repo_names(words: Sequence[str], anchor: str) -> set[str]:
+    """Repo names listed in the named task's manifest."""
+    task = _task_name_after(words, anchor)
+    if not task:
+        return set()
+    if not _activate_fleet_from_words(words):
+        return set()
+    try:
+        from fleet.state import tasks_root
+        from fleet.tasks.manifest import Manifest
+        ws = tasks_root() / task
+        if not ws.is_dir():
+            return set()
+        m = Manifest.try_load(ws)
+        if m is None:
+            return set()
+        out: set[str] = set()
+        for r in m.repos:
+            out.add(r.name)
+            if r.group:
+                out.add(f"{r.group}/{r.name}")
+        return out
+    except Exception:
+        return set()
+
+
+def _repo_names_not_in_task(words: Sequence[str]) -> list[str]:
+    members = _manifest_repo_names(words, "add-repo")
+    return [r for r in _repo_names(words) if r not in members]
+
+
+def _repo_names_in_task(words: Sequence[str]) -> list[str]:
+    return sorted(_manifest_repo_names(words, "remove-repo"))
+
+
 ValueProvider = Callable[[Sequence[str]], list[str]]
 
 # Positional value providers keyed by command-path tuple (subcommand chain).
@@ -169,6 +228,10 @@ POS_PROVIDERS: dict[tuple[str, ...], ValueProvider] = {
     ("task", "end"): lambda w: _task_names(w),
     ("task", "path"): lambda w: _task_names(w),
     ("task", "open"): lambda w: _task_names(w),
+    ("task", "add-repo"): lambda w: _task_names(w),
+    ("task", "remove-repo"): lambda w: _task_names(w),
+    ("task", "rename"): lambda w: _task_names(w),
+    ("task", "edit"): lambda w: _task_names(w),
     ("open",): lambda w: _task_names(w),
     ("fleets", "default"): lambda w: _fleet_names(w),
     ("fleets", "remove"): lambda w: _fleet_names(w),
@@ -242,8 +305,14 @@ def _complete_option_value(
         return DIRECTIVE_DEFAULT, []
 
     # --repos is comma-separated: complete the trailing segment, preserve the
-    # head, request nospace so the user can keep adding commas.
+    # head, request nospace so the user can keep adding commas. Subcommand
+    # context picks the right candidate set: add-repo excludes current
+    # members, remove-repo restricts to current members.
     if "--repos" in action.option_strings:
+        if "add-repo" in words:
+            provider = _repo_names_not_in_task
+        elif "remove-repo" in words:
+            provider = _repo_names_in_task
         head, sep, tail = current.rpartition(",")
         prefix = f"{head}{sep}" if sep else ""
         already = set(filter(None, head.split(","))) if sep else set()

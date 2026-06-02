@@ -293,3 +293,53 @@ class TestRobustness:
         out = capsys.readouterr().out.splitlines()
         assert out[0] == f":{completion.DIRECTIVE_NOSPACE}"
         assert "alpha" in out
+
+
+class TestEditSubcommandRepoFiltering:
+    """add-repo / remove-repo filter --repos against the task's manifest."""
+
+    def test_add_repo_excludes_current_members(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            completion, "_repo_names",
+            lambda _w: ["alpha", "beta", "gamma"],
+        )
+        monkeypatch.setattr(
+            completion, "_manifest_repo_names",
+            lambda _w, _anchor: {"alpha"},
+        )
+        directive, cands = _complete(
+            "task", "add-repo", "t", "--repos", "",
+        )
+        assert directive == completion.DIRECTIVE_NOSPACE
+        assert "alpha" not in cands
+        assert "beta" in cands
+        assert "gamma" in cands
+
+    def test_remove_repo_offers_only_members(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            completion, "_repo_names",
+            lambda _w: ["alpha", "beta", "gamma"],
+        )
+        monkeypatch.setattr(
+            completion, "_manifest_repo_names",
+            lambda _w, _anchor: {"alpha", "beta"},
+        )
+        directive, cands = _complete(
+            "task", "remove-repo", "t", "--repos", "",
+        )
+        assert directive == completion.DIRECTIVE_NOSPACE
+        assert set(cands) == {"alpha", "beta"}
+
+    def test_edit_subcommands_offer_task_names(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            completion, "_task_names", lambda _w: ["t1", "t2"],
+        )
+        for sub in ("add-repo", "remove-repo", "rename", "edit"):
+            assert _candidates("task", sub, "") == ["t1", "t2"], sub
+
