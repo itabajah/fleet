@@ -48,11 +48,20 @@ def _default_tasks_root() -> Path:
 
     Override at any time with the ``FLEET_TASKS_ROOT`` environment variable
     (consumed by ``tasks_root()`` in :mod:`fleet.state`).
+
+    On Windows we default to ``%LOCALAPPDATA%\\fleet-tasks`` rather than a
+    drive root like ``C:\\Tasks``: the latter requires write access to the
+    drive root, which many locked-down/corp-managed accounts don't have.
+    LOCALAPPDATA is always user-writable. Falls back to
+    ``~/AppData/Local/fleet-tasks`` in the rare case the env var is unset.
     """
     # Read sys.platform via getattr so mypy doesn't conclude one branch is
     # unreachable based on the platform it's checking against.
     if getattr(sys, "platform", "") == "win32":
-        return Path(r"C:\Tasks")
+        local_appdata = os.environ.get("LOCALAPPDATA")
+        if local_appdata:
+            return Path(local_appdata) / "fleet-tasks"
+        return Path.home() / "AppData" / "Local" / "fleet-tasks"
     return Path.home() / "fleet-tasks"
 
 

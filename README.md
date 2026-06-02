@@ -51,8 +51,9 @@ fleet --help
 
 That's it. The module sets `PYTHONPATH` to the package's `src/` for you,
 so no `pip install` is needed. (You can `pip install -e .` if you'd
-rather have `fleet` on `PATH` without the PS module — see [Without the
-PS module](#without-the-powershell-module) below.)
+rather have `fleet` on `PATH` without any shell wrapper — see
+[Shell integration on Linux/macOS](#shell-integration-on-linuxmacos)
+below for the bash/zsh equivalent.)
 
 ### Requirements
 
@@ -60,7 +61,7 @@ PS module](#without-the-powershell-module) below.)
 | ------------- | ----------------------------------------------------------------- |
 | Python        | ≥ 3.10                                                            |
 | `git`         | any modern version (must support `git worktree`)                  |
-| PowerShell    | any modern version (only needed for `Fleet.psm1` and `fleet open`) |
+| shell wrapper | optional — `Fleet.psm1` (PowerShell) or `fleet.sh` (bash/zsh), only needed for `fleet open` |
 | `code`        | optional — used by `fleet open` to launch VS Code on the workspace |
 
 ---
@@ -117,7 +118,7 @@ That's the entire happy path.
 | `fleet task sync <name>`                     | Fetch + ff-pull each worktree on its task branch                          |
 | `fleet task end <name> [--force]`            | Archive `task.json`/`context.md`/`scratch/`, tear down worktrees          |
 | `fleet task path <name>`                     | Print the absolute workspace path (used by `fleet open` internally)       |
-| `fleet open <name>`                          | `cd` into a task workspace and launch VS Code (PowerShell only)           |
+| `fleet open <name>`                          | `cd` into a task workspace and launch VS Code (PowerShell or `fleet.sh`)  |
 | `fleet fleets list`                          | Show every configured fleet, mark default                                 |
 | `fleet fleets add <name> [--root PATH] [--force]` | Register a fleet (defaults to current directory; `--force` overwrites)    |
 | `fleet fleets default <name>`                | Switch the default fleet                                                  |
@@ -188,11 +189,10 @@ scan handles both forms on read and emits the collapsed form on write.
 ### Tasks
 
 Task workspaces live at `<TASKS_ROOT>/<fleet>/<task>/`. Default
-`TASKS_ROOT` is `C:\Tasks` on Windows and `~/fleet-tasks` elsewhere;
-override at any time with the `FLEET_TASKS_ROOT` environment variable.
-Note that `C:\Tasks` requires write access to the drive root — if your
-account can't write there, set `FLEET_TASKS_ROOT` to e.g.
-`%LOCALAPPDATA%\fleet-tasks` before the first `fleet task new`.
+`TASKS_ROOT` is `%LOCALAPPDATA%\fleet-tasks` on Windows and
+`~/fleet-tasks` elsewhere — both are always user-writable. Override at
+any time with the `FLEET_TASKS_ROOT` environment variable (e.g. point it
+at a fast scratch disk).
 
 Each task gets:
 
@@ -209,12 +209,16 @@ Each task gets:
 every worktree and the workspace folder. Use `--force` to tear down
 through dirty worktrees.
 
-### `fleet open` (PowerShell only)
+### `fleet open` (shell integration)
 
 `fleet open <task>` resolves the path via `fleet task path <task>`,
 sets the current directory, and launches VS Code (`code` on `PATH`).
 Python can't change the parent shell's cwd, which is why this command
-lives in the PowerShell module rather than the CLI itself.
+lives in a shell wrapper rather than the CLI itself:
+
+- **PowerShell** (Windows, or pwsh 7 on Linux/macOS): `Fleet.psm1`.
+- **bash/zsh** (Linux/macOS/WSL/Git Bash): `fleet.sh` — `source` it from
+  your shell rc (see [Shell integration on Linux/macOS](#shell-integration-on-linuxmacos)).
 
 To open a task in a non-default fleet: `fleet open <task> -F NAME`.
 
@@ -248,6 +252,7 @@ whichever one you pass via `-F`). There is no global task list.
 ```
 fleet/
 ├── Fleet.psm1                 # PowerShell entry point
+├── fleet.sh                   # bash/zsh entry point (Linux/macOS/WSL)
 ├── README.md                  # this file
 ├── pyproject.toml             # package metadata (no runtime deps)
 └── src/fleet/
@@ -272,17 +277,29 @@ fleet/
 
 ---
 
-## Without the PowerShell module
+## Shell integration on Linux/macOS
 
-If you'd rather skip PowerShell or you're on Linux/macOS:
+The Python CLI is fully cross-platform; only `fleet open` needs a shell
+wrapper (it has to change the parent shell's cwd, which no child process
+can do). Source `fleet.sh` from your `~/.bashrc` / `~/.zshrc`:
 
 ```bash
-pip install -e <path-to-clone>
+echo 'source "$HOME/src/fleet/fleet.sh"' >> ~/.bashrc   # or ~/.zshrc
+exec $SHELL          # reload
 fleet --help
 ```
 
-Every command works exactly the same. The only thing you lose is
-`fleet open`, which has to mutate the parent shell — replace it with:
+That gives you the full command set — including `fleet open <name>`
+(and `fleet open <name> -F work`) — with the same behavior as the
+PowerShell module. It sets `PYTHONPATH` to the package's `src/` for you,
+so no `pip install` is needed.
+
+### Without any shell wrapper
+
+If you'd rather not source anything (or you installed via
+`pip install -e <path-to-clone>` so `fleet` is already on `PATH`), every
+command works the same — the only thing you lose is `fleet open`, which
+you replace with:
 
 ```bash
 cd "$(fleet task path <name>)" && code .
@@ -290,8 +307,7 @@ cd "$(fleet task path <name>)" && code .
 cd "$(fleet task path <name> -F work)" && code .
 ```
 
-For zsh/bash, you can wrap that in a function. The Python CLI never
-touches your shell state.
+The Python CLI never touches your shell state.
 
 ---
 
@@ -300,7 +316,7 @@ touches your shell state.
 | Variable                | Purpose                                                       | Default                                          |
 | ----------------------- | ------------------------------------------------------------- | ------------------------------------------------ |
 | `FLEET_CONFIG_PATH`     | Override the global fleets index location                     | `%LOCALAPPDATA%\fleet\fleets.json` / `~/.config/fleet/fleets.json` |
-| `FLEET_TASKS_ROOT`      | Override the parent of `<fleet>/<task>/`                       | `C:\Tasks` (Windows) / `~/fleet-tasks` (other)   |
+| `FLEET_TASKS_ROOT`      | Override the parent of `<fleet>/<task>/`                       | `%LOCALAPPDATA%\fleet-tasks` (Windows) / `~/fleet-tasks` (other) |
 | `FLEET_REPOS_ROOT`      | Escape hatch used only when no fleet is active (tests / scripts); ignored once a fleet has been resolved | (unset)                                          |
 
 | File                                     | What                                                |

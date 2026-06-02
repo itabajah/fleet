@@ -26,10 +26,21 @@ def test_tasks_root_base_respects_env(monkeypatch: pytest.MonkeyPatch,
     assert paths.tasks_root_base() == target
 
 
-def test_tasks_root_base_default_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_tasks_root_base_default_windows(monkeypatch: pytest.MonkeyPatch,
+                                         tmp_path: Path) -> None:
     monkeypatch.delenv("FLEET_TASKS_ROOT", raising=False)
     monkeypatch.setattr(sys, "platform", "win32")
-    assert paths.tasks_root_base() == Path(r"C:\Tasks")
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    assert paths.tasks_root_base() == tmp_path / "fleet-tasks"
+
+
+def test_tasks_root_base_default_windows_no_localappdata(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("FLEET_TASKS_ROOT", raising=False)
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    monkeypatch.setattr(sys, "platform", "win32")
+    expected = Path.home() / "AppData" / "Local" / "fleet-tasks"
+    assert paths.tasks_root_base() == expected
 
 
 def test_tasks_root_base_default_posix(monkeypatch: pytest.MonkeyPatch,
