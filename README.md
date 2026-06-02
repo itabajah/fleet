@@ -311,6 +311,37 @@ The Python CLI never touches your shell state.
 
 ---
 
+## Tab completion
+
+Pressing `<Tab>` after `fleet` (and its subcommands and flags) suggests
+valid completions, including dynamic values: fleet names for `-F`, task
+names for `fleet task info|sync|end|path|open`, and repo names for
+`fleet task new --repos`.
+
+If you source the shell wrapper, completion is **already wired up** — no
+extra step needed:
+
+- PowerShell: `Import-Module <install-dir>\Fleet.psm1`
+- bash/zsh:   `source <install-dir>/fleet.sh`
+
+If you installed via `pip install -e .` and prefer not to source the
+wrapper, register completion directly with your shell:
+
+```bash
+# bash (~/.bashrc)
+source <(fleet completion bash)
+
+# zsh (~/.zshrc, after `autoload -Uz compinit && compinit`)
+source <(fleet completion zsh)
+```
+
+```powershell
+# PowerShell ($PROFILE)
+Invoke-Expression (& fleet completion powershell | Out-String)
+```
+
+---
+
 ## Configuration cheatsheet
 
 | Variable                | Purpose                                                       | Default                                          |

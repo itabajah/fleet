@@ -42,6 +42,9 @@ fleet = "fleet.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+fleet = ["completions/*.bash", "completions/*.zsh", "completions/*.ps1"]
+
 # ---------------------------------------------------------------------------
 # pytest
 # ---------------------------------------------------------------------------

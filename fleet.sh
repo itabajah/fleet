@@ -138,3 +138,19 @@ _fleet_open() {
         printf 'VS Code (code) not on PATH; skipping launch.\n' >&2
     fi
 }
+
+# Source the shell completion glue. The script lives in the package so the
+# Python engine and shell glue stay in lockstep. zsh and bash get separate
+# files because they speak slightly different completion dialects.
+if [ -n "${ZSH_VERSION:-}" ]; then
+    _fleet_completion_script="${_FLEET_SRC}/fleet/completions/fleet.zsh"
+elif [ -n "${BASH_VERSION:-}" ]; then
+    _fleet_completion_script="${_FLEET_SRC}/fleet/completions/fleet.bash"
+else
+    _fleet_completion_script=""
+fi
+if [ -n "$_fleet_completion_script" ] && [ -f "$_fleet_completion_script" ]; then
+    # shellcheck disable=SC1090
+    . "$_fleet_completion_script"
+fi
+unset _fleet_completion_script

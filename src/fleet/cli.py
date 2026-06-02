@@ -23,7 +23,7 @@ import contextlib
 import sys
 from pathlib import Path
 
-from fleet import __version__, fleets_commands, repos_command, scan, sync, tasks
+from fleet import __version__, completion, fleets_commands, repos_command, scan, sync, tasks
 from fleet.console import dim, red
 from fleet.errors import FleetError
 from fleet.fleets_config import FleetsConfig
@@ -112,7 +112,23 @@ def build_parser() -> argparse.ArgumentParser:
     s_topen.add_argument("name", nargs="?", help="task name")
     s_topen.set_defaults(func=_open_unsupported)
 
+    # `fleet completion <shell>` — print the shell completion script. Users
+    # source it once (e.g. `source <(fleet completion bash)`) when they
+    # don't want to source the wrapper.
+    s_comp = subparsers.add_parser(
+        "completion",
+        help="print the shell completion script for bash/zsh/powershell",
+    )
+    s_comp.add_argument("shell", choices=("bash", "zsh", "powershell"),
+                        help="target shell")
+    s_comp.set_defaults(func=_cmd_completion)
+
     return p
+
+
+def _cmd_completion(args: argparse.Namespace) -> int:
+    sys.stdout.write(completion.get_script(args.shell))
+    return 0
 
 
 def _needs_active_fleet(args: argparse.Namespace) -> bool:
@@ -121,9 +137,7 @@ def _needs_active_fleet(args: argparse.Namespace) -> bool:
     ``fleet fleets ...`` and ``fleet open`` (and ``fleet task open``) are
     excluded: they manage config or shell state and don't read the registry.
     """
-    if args.cmd == "fleets":
-        return False
-    if args.cmd == "open":
+    if args.cmd in ("fleets", "open", "completion"):
         return False
     return not (args.cmd == "task" and getattr(args, "task_cmd", None) == "open")
 
@@ -142,6 +156,17 @@ def main(argv: list[str] | None = None) -> int:
             continue
         with contextlib.suppress(OSError):
             reconfigure(encoding="utf-8", errors="replace")
+
+    # Hidden completion entry point: intercept before argparse sees it so
+    # the subcommand stays fully off `--help`. Called by the shell glue as
+    # ``fleet __complete -- <words...>``. Stdout-only, never raises.
+    raw = sys.argv[1:] if argv is None else list(argv)
+    if raw and raw[0] == "__complete":
+        words = raw[1:]
+        if words and words[0] == "--":
+            words = words[1:]
+        completion.render(words)
+        return 0
 
     parser = build_parser()
     args = parser.parse_args(argv)

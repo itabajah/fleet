@@ -167,3 +167,10 @@ function Invoke-FleetOpen {
 }
 
 Export-ModuleMember -Function fleet
+
+# Register the native argument completer for `fleet`. The script lives in the
+# package so the Python engine and PowerShell glue stay in lockstep.
+$script:FleetCompletionScript = Join-Path $script:FleetSrc 'fleet\completions\fleet.ps1'
+if (Test-Path -LiteralPath $script:FleetCompletionScript) {
+    . $script:FleetCompletionScript
+}
