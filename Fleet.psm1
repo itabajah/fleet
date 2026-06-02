@@ -139,7 +139,10 @@ function Invoke-FleetOpen {
 
     # `task path` writes only the workspace path to stdout; banners and
     # other diagnostics go to stderr. Trim and use the first non-empty line.
-    $lines = @($result.Stdout) | Where-Object { $_ -and $_.ToString().Trim() }
+    # Wrap the whole pipeline in @(...) so a single line stays an array
+    # rather than collapsing to a string (where $lines[0] would index the
+    # first character instead of the first line).
+    $lines = @(@($result.Stdout) | Where-Object { $_ -and $_.ToString().Trim() })
     if (-not $lines) {
         Write-Error 'fleet task path produced no output'
         $global:LASTEXITCODE = 1
