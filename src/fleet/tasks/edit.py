@@ -9,7 +9,6 @@ stays identical to ``task new``.
 from __future__ import annotations
 
 import argparse
-import contextlib
 import shutil
 import sys
 from pathlib import Path
@@ -27,7 +26,11 @@ from fleet.tasks.validation import (
     task_branch,
     validate_task_name,
 )
-from fleet.tasks.worktree import add_worktree, prepare_canonical
+from fleet.tasks.worktree import (
+    add_worktree,
+    assert_no_leaf_collision,
+    prepare_canonical,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -84,21 +87,10 @@ def cmd_add_repo(args: argparse.Namespace) -> int:
         chosen.append(repo)
 
     # Leaf collision: among new repos, and against existing manifest entries.
-    new_leaves: dict[str, RepoInfo] = {}
-    for r in chosen:
-        prior = new_leaves.get(r.name)
-        if prior is not None:
-            raise FleetError(
-                f"Two selected repos share leaf name '{r.name}': "
-                f"'{prior.display_name}' and '{r.display_name}'. "
-                f"Their worktrees would collide at {workspace / r.name}."
-            )
-        if r.name in existing_leaves:
-            raise FleetError(
-                f"Worktree leaf '{r.name}' already exists in task '{name}' "
-                f"at {workspace / r.name}. Pick a different repo."
-            )
-        new_leaves[r.name] = r
+    # Case-insensitive on Windows/macOS so 'Foo' vs 'foo' is caught before
+    # the second ``git worktree add`` fails mid-scaffold.
+    assert_no_leaf_collision(chosen, workspace,
+                             existing_leaves=existing_leaves)
 
     branch = task_branch(name)
     print(f"Adding {len(chosen)} repo(s) to task '{name}' (branch {branch}):")
@@ -147,8 +139,11 @@ def cmd_add_repo(args: argparse.Namespace) -> int:
                                 cwd=repo.path, check=False)
         raise
 
-    with contextlib.suppress(Exception):
+    try:
         _append_context_repos(workspace, chosen)
+    except OSError as e:
+        print(yellow(f"note: couldn't update context.md ({e}); "
+                     "task.json was saved."), file=sys.stderr)
 
     print(f"\nUpdated task.json (now {len(manifest.repos)} repo(s)).")
     return 0
@@ -367,8 +362,11 @@ def cmd_rename(args: argparse.Namespace) -> int:
     for r in manifest.repos:
         git_ops.worktree_repair(r.canonical_path, r.worktree_path)
 
-    with contextlib.suppress(Exception):
+    try:
         _rewrite_context_header(new_workspace, old, new, new_branch)
+    except OSError as e:
+        print(yellow(f"note: couldn't update context.md ({e}); "
+                     "task.json was saved."), file=sys.stderr)
 
     print(f"  rewrote task.json + context.md")
     print(f"\nDone. (If you were inside the old workspace, "
@@ -428,8 +426,11 @@ def cmd_edit(args: argparse.Namespace) -> int:
     manifest.description = description
     manifest.save(workspace)
 
-    with contextlib.suppress(Exception):
+    try:
         _rewrite_context_description(workspace, description)
+    except OSError as e:
+        print(yellow(f"note: couldn't update context.md ({e}); "
+                     "task.json was saved."), file=sys.stderr)
 
     print(f"Updated description for task '{name}'.")
     return 0

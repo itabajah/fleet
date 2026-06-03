@@ -151,6 +151,20 @@ def test_retry_call_exhausted(monkeypatch) -> None:
     assert result.ok is False
 
 
+def test_retry_call_backoff_is_capped(monkeypatch) -> None:
+    """Backoff must not grow unbounded: a future bump to ``_MAX_RETRIES``
+    can't silently produce minute-long sleeps between retries.
+    """
+    sleeps: list[float] = []
+    monkeypatch.setattr(sync.time, "sleep", lambda s: sleeps.append(s))
+    monkeypatch.setattr(sync, "_MAX_RETRIES", 8)
+    monkeypatch.setattr(sync, "_INITIAL_BACKOFF_SECONDS", 4)
+    monkeypatch.setattr(sync, "_MAX_BACKOFF_SECONDS", 10)
+    sync._retry_call("Op", lambda: _transient(), [])
+    assert sleeps, "expected at least one sleep between retries"
+    assert max(sleeps) <= 10
+
+
 # ---------------------------------------------------------------------------
 # _print_lines + _color_for round-trip
 # ---------------------------------------------------------------------------

@@ -151,3 +151,43 @@ def test_repo_entry_display_name() -> None:
     e2 = RepoEntry(name="alpha", group="g/sub",
                    canonical_path=Path("/a"), worktree_path=Path("/b"))
     assert e2.display_name == "g/sub/alpha"
+
+
+def test_load_strips_utf8_bom(tmp_path: Path) -> None:
+    """Editors that save with a UTF-8 BOM (Notepad, some IDEs) must not
+    break manifest reads. ``json.loads`` doesn't tolerate the BOM directly,
+    so the file is read with ``utf-8-sig``."""
+    payload = _good_manifest_dict(tmp_path)
+    (tmp_path / "task.json").write_bytes(
+        b"\xef\xbb\xbf" + json.dumps(payload).encode("utf-8")
+    )
+    m = Manifest.load(tmp_path)
+    assert m.name == "task-1"
+
+
+def test_load_rejects_invalid_branch(tmp_path: Path) -> None:
+    """A hand-edited manifest with a git-invalid branch fails at load time,
+    not deep inside the next git invocation."""
+    payload = _good_manifest_dict(tmp_path)
+    payload["branch"] = "task/demo/bad..name"
+    (tmp_path / "task.json").write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(FleetError, match="ref-format"):
+        Manifest.load(tmp_path)
+
+
+def test_load_rejects_relative_canonical_path(tmp_path: Path) -> None:
+    """Relative paths in the manifest are ambiguous (resolved against
+    process cwd) and almost never what the user wants — reject up front."""
+    payload = _good_manifest_dict(tmp_path)
+    payload["repos"][0]["canonical_path"] = "relative/path"
+    (tmp_path / "task.json").write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(FleetError, match="non-absolute 'canonical_path'"):
+        Manifest.load(tmp_path)
+
+
+def test_load_rejects_relative_worktree_path(tmp_path: Path) -> None:
+    payload = _good_manifest_dict(tmp_path)
+    payload["repos"][0]["worktree_path"] = "alpha"
+    (tmp_path / "task.json").write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(FleetError, match="non-absolute 'worktree_path'"):
+        Manifest.load(tmp_path)

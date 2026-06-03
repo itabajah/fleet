@@ -64,7 +64,7 @@ class BundlesConfig:
         if not path.is_file():
             return cls()
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
         except json.JSONDecodeError as e:
             raise FleetError(f"Malformed bundles config at {path}: {e}") from e
         if not isinstance(data, dict):

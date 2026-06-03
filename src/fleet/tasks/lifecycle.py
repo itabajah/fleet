@@ -18,7 +18,11 @@ from fleet.errors import FleetError
 from fleet.state import archive_root, tasks_root
 from fleet.tasks.manifest import Manifest, RepoEntry, now_iso
 from fleet.tasks.validation import resolve_repo, task_branch, validate_task_name
-from fleet.tasks.worktree import add_worktree, prepare_canonical
+from fleet.tasks.worktree import (
+    add_worktree,
+    assert_no_leaf_collision,
+    prepare_canonical,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -62,18 +66,9 @@ def cmd_new(args: argparse.Namespace) -> int:
     # Worktree paths are `<workspace>/<repo.name>`, so two repos that
     # resolve to the same leaf name (e.g. `foo` and `bar/foo`) would
     # collide on disk halfway through scaffolding. Catch it before any
-    # mutation.
-    by_leaf: dict[str, RepoInfo] = {}
-    for r in chosen:
-        prior = by_leaf.get(r.name)
-        if prior is not None:
-            raise FleetError(
-                f"Two selected repos share leaf name '{r.name}': "
-                f"'{prior.display_name}' and '{r.display_name}'. "
-                f"Their worktrees would collide at {workspace / r.name}. "
-                f"Pick a different combination of repos."
-            )
-        by_leaf[r.name] = r
+    # mutation. Case-insensitive on Windows/macOS so 'Foo' vs 'foo'
+    # collides there too.
+    assert_no_leaf_collision(chosen, workspace)
 
     print(f"Creating task '{name}' with {len(chosen)} repo(s):")
     for r in chosen:

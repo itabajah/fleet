@@ -25,6 +25,9 @@ _MAX_PARALLEL = 32
 DEFAULT_WORKERS = 10
 _MAX_RETRIES = 3
 _INITIAL_BACKOFF_SECONDS = 2
+# Cap exponential backoff so future bumps to _MAX_RETRIES can't silently
+# produce minute-long waits between retries.
+_MAX_BACKOFF_SECONDS = 30
 
 
 @dataclass
@@ -107,7 +110,7 @@ def _probe_host(repo: RepoInfo) -> tuple[bool, str]:
         last_err = (result.stderr or result.stdout).strip()
         if attempt < _MAX_RETRIES and git_ops.is_transient_error(result):
             time.sleep(delay)
-            delay *= 2
+            delay = min(delay * 2, _MAX_BACKOFF_SECONDS)
             continue
         break
     return False, last_err
@@ -177,7 +180,7 @@ def _retry_call(label: str, fn, output: list[_Line]) -> git_ops.GitResult:
                 "yellow",
             ))
             time.sleep(delay)
-            delay *= 2
+            delay = min(delay * 2, _MAX_BACKOFF_SECONDS)
             continue
         break
     assert last is not None  # _MAX_RETRIES >= 1

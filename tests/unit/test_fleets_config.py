@@ -243,3 +243,41 @@ def test_fleet_entry_dataclass(tmp_path: Path) -> None:
     e = FleetEntry(name="x", root=tmp_path)
     assert e.name == "x"
     assert e.root == tmp_path
+
+
+def test_load_strips_utf8_bom(tmp_path: Path,
+                              monkeypatch: pytest.MonkeyPatch) -> None:
+    """Notepad / some IDEs prepend a UTF-8 BOM on save; ``json.loads``
+    doesn't tolerate it, so we read with ``utf-8-sig``."""
+    p = tmp_path / "f.json"
+    payload = json.dumps({
+        "default": "alpha",
+        "fleets": {"alpha": {"root": str(tmp_path)}},
+    })
+    p.write_bytes(b"\xef\xbb\xbf" + payload.encode("utf-8"))
+    monkeypatch.setenv("FLEET_CONFIG_PATH", str(p))
+    cfg = FleetsConfig.load()
+    assert cfg.default == "alpha"
+
+
+def test_config_lock_falls_back_with_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys,
+) -> None:
+    """A stale lock from a crashed peer must not wedge the CLI forever:
+    after the timeout we proceed without the lock but emit a stderr warning
+    so the user can notice and clean up."""
+    from fleet import fleets_config
+
+    monkeypatch.setattr(fleets_config, "_LOCK_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(fleets_config, "_LOCK_POLL_SECONDS", 0.01)
+
+    target = tmp_path / "fleets.json"
+    lock = target.with_suffix(target.suffix + ".lock")
+    lock.touch()  # pre-existing stale lock
+
+    with fleets_config._config_lock(target):
+        pass
+
+    err = capsys.readouterr().err
+    assert "acquired" in err
+    assert "without lock" in err

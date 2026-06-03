@@ -15,6 +15,9 @@ from fleet.state import require_active_fleet
 # ``.``, ``.lock`` suffix, ``@{``).
 _TASK_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-]{0,63}$")
 
+# Characters git itself forbids inside any ref segment (see git-check-ref-format).
+_BAD_BRANCH_CHARS = re.compile(r"[\s~^:?*\[\\\x00-\x1f\x7f]")
+
 
 def validate_task_name(name: str) -> None:
     """Raise :class:`FleetError` if ``name`` isn't safe to use everywhere."""
@@ -31,6 +34,38 @@ def validate_task_name(name: str) -> None:
             f"Invalid task name '{name}'. Git would refuse the resulting "
             "branch (no '..', no leading/trailing '.', no '.lock' suffix, "
             "no '@{')."
+        )
+
+
+def validate_branch(branch: str, *, context: str = "branch") -> None:
+    """Raise :class:`FleetError` if ``branch`` isn't a valid git ref name.
+
+    Defends against hand-edited manifests whose ``branch`` field would
+    only fail much later, deep inside a git invocation. Catches empties,
+    leading dashes (would parse as a CLI flag), git-special chars, and
+    the same ref-format edge cases as :func:`validate_task_name`.
+    """
+    if not branch:
+        raise FleetError(f"Invalid {context}: empty.")
+    if branch.startswith("-"):
+        raise FleetError(
+            f"Invalid {context} '{branch}': must not start with '-' "
+            "(would parse as a CLI flag)."
+        )
+    if _BAD_BRANCH_CHARS.search(branch):
+        raise FleetError(
+            f"Invalid {context} '{branch}': contains whitespace or one of "
+            "the characters git forbids in refs (~ ^ : ? * [ \\ or control)."
+        )
+    if (".." in branch
+            or branch.startswith(".") or branch.endswith(".")
+            or branch.endswith(".lock") or "@{" in branch
+            or branch.startswith("/") or branch.endswith("/")
+            or "//" in branch):
+        raise FleetError(
+            f"Invalid {context} '{branch}': violates git ref-format rules "
+            "(no '..', no leading/trailing '.' or '/', no '.lock' suffix, "
+            "no '@{', no '//')."
         )
 
 

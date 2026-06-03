@@ -60,6 +60,15 @@ def _config_lock(path: Path) -> Iterator[None]:
             if time.monotonic() >= deadline:
                 # Stale lock fallback: proceed without locking. Two writers
                 # can still collide here, but better than hanging forever.
+                # Surface the situation so the user can clean up a stale
+                # lock from a crashed peer process.
+                print(
+                    f"WARN: acquired {path.name} without lock after "
+                    f"{_LOCK_TIMEOUT_SECONDS:g}s waiting on {lock_path}; "
+                    f"concurrent writers may race. "
+                    f"Delete the lock file if no other fleet process is running.",
+                    file=sys.stderr,
+                )
                 fd = None
                 break
             time.sleep(_LOCK_POLL_SECONDS)
@@ -117,7 +126,7 @@ class FleetsConfig:
         path = _config_file()
         if path.is_file():
             try:
-                data = json.loads(path.read_text(encoding="utf-8"))
+                data = json.loads(path.read_text(encoding="utf-8-sig"))
             except json.JSONDecodeError as e:
                 raise FleetError(f"Malformed fleets config at {path}: {e}") from e
             fleets: dict[str, FleetEntry] = {}

@@ -78,6 +78,15 @@ def test_load_registry_raises_on_malformed(tmp_path: Path) -> None:
         state.load_registry()
 
 
+def test_load_registry_strips_utf8_bom(tmp_path: Path) -> None:
+    """Editors that save with a UTF-8 BOM must not break registry reads."""
+    (tmp_path / "fleet.json").write_bytes(
+        b"\xef\xbb\xbf" + b'{"root": "."}'
+    )
+    state.set_active_fleet("demo", tmp_path)
+    assert state.load_registry() == {"root": "."}
+
+
 def test_sync_root_default_is_repos_root(tmp_path: Path) -> None:
     state.set_active_fleet("demo", tmp_path)
     assert state.sync_root() == tmp_path.resolve()

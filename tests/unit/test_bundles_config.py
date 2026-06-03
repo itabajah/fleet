@@ -156,6 +156,15 @@ class TestBundlesConfig:
         with pytest.raises(FleetError, match="list of strings"):
             BundlesConfig.load()
 
+    def test_load_strips_utf8_bom(self, active_fleet: Path) -> None:
+        """Editors that save with a UTF-8 BOM must not break bundle reads."""
+        bundles_path().write_bytes(
+            b"\xef\xbb\xbf"
+            + json.dumps({"bundles": {"b": ["alpha"]}}).encode("utf-8")
+        )
+        cfg = BundlesConfig.load()
+        assert cfg.get("b") == ["alpha"]
+
 
 # ---------------------------------------------------------------------------
 # expand_bundle_tokens

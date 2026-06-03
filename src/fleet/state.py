@@ -105,7 +105,7 @@ def load_registry() -> dict:
     if not path.is_file():
         return {}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8-sig"))
     except json.JSONDecodeError as e:
         raise FleetError(f"Malformed registry at {path}: {e}") from e
 

@@ -7,12 +7,65 @@ rationale, same branch-exists guards in both the canonical and origin).
 
 from __future__ import annotations
 
+import os
+from collections.abc import Iterable
 from pathlib import Path
 
 from fleet import git_ops
 from fleet.discovery import RepoInfo
 from fleet.errors import FleetError
 from fleet.tasks.validation import task_branch
+
+
+# True on Windows / default macOS HFS+ where 'Foo' and 'foo' collide on disk.
+_FS_CASE_INSENSITIVE = os.path.normcase("A") == os.path.normcase("a")
+
+
+def _leaf_key(name: str) -> str:
+    """Normalize a worktree leaf for collision checks.
+
+    On case-insensitive filesystems (Windows, macOS default), ``Foo`` and
+    ``foo`` resolve to the same directory and the second ``git worktree
+    add`` will fail mid-scaffold. Casefold there; keep exact match on
+    case-sensitive filesystems so two legitimately-distinct repos with
+    only-case-differing names still work on Linux.
+    """
+    return name.casefold() if _FS_CASE_INSENSITIVE else name
+
+
+def assert_no_leaf_collision(
+    chosen: list[RepoInfo],
+    workspace: Path,
+    *,
+    existing_leaves: Iterable[str] = (),
+) -> None:
+    """Pre-flight check that no two worktrees will land at the same path.
+
+    Detects three cases:
+      * Two newly-selected repos share a (normalized) leaf name.
+      * A newly-selected repo's leaf collides with an existing manifest entry.
+
+    Raises :class:`FleetError` BEFORE any disk mutation so partial scaffolds
+    can't happen.
+    """
+    existing_keys = {_leaf_key(n) for n in existing_leaves}
+    by_leaf: dict[str, RepoInfo] = {}
+    for r in chosen:
+        key = _leaf_key(r.name)
+        prior = by_leaf.get(key)
+        if prior is not None:
+            raise FleetError(
+                f"Two selected repos share leaf name '{r.name}': "
+                f"'{prior.display_name}' and '{r.display_name}'. "
+                f"Their worktrees would collide at {workspace / r.name}. "
+                f"Pick a different combination of repos."
+            )
+        if key in existing_keys:
+            raise FleetError(
+                f"Worktree leaf '{r.name}' already exists in task at "
+                f"{workspace / r.name}. Pick a different repo."
+            )
+        by_leaf[key] = r
 
 
 def prepare_canonical(repo: RepoInfo, no_pull: bool) -> str:

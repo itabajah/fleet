@@ -9,7 +9,12 @@ import pytest
 from fleet.discovery import RepoInfo
 from fleet.errors import FleetError
 from fleet.state import set_active_fleet
-from fleet.tasks.validation import resolve_repo, task_branch, validate_task_name
+from fleet.tasks.validation import (
+    resolve_repo,
+    task_branch,
+    validate_branch,
+    validate_task_name,
+)
 
 # ---------------------------------------------------------------------------
 # validate_task_name
@@ -109,3 +114,30 @@ def test_resolve_strips_leading_trailing_slashes() -> None:
     repos = [_r("alpha")]
     chosen = resolve_repo("/alpha/", repos)
     assert chosen.name == "alpha"
+
+
+# ---------------------------------------------------------------------------
+# validate_branch
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("good", [
+    "main", "task/alpha/bug-1", "feature/x.y", "release/1.2.3",
+])
+def test_validate_branch_accepts_valid(good: str) -> None:
+    validate_branch(good)
+
+
+@pytest.mark.parametrize("bad", [
+    "",                       # empty
+    "-flag-like",             # CLI-flag hazard
+    "has space",              # whitespace
+    "tilde~name", "caret^x",  # git-special chars
+    "colon:bad", "star*bad", "bracket[bad",
+    "back\\slash",
+    ".leading", "trailing.", "trailing.lock",
+    "double..dot", "with@{ref",
+    "/leading-slash", "trailing-slash/", "double//slash",
+])
+def test_validate_branch_rejects_invalid(bad: str) -> None:
+    with pytest.raises(FleetError):
+        validate_branch(bad)

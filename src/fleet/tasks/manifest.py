@@ -64,11 +64,21 @@ class RepoEntry:
                 f"Malformed {MANIFEST_FILENAME} at {manifest_path}: repo "
                 f"'{name}' missing 'canonical_path' or 'worktree_path'."
             )
+        canonical_path = Path(canonical)
+        worktree_path = Path(worktree)
+        for field_name, p in (("canonical_path", canonical_path),
+                              ("worktree_path", worktree_path)):
+            if not p.is_absolute():
+                raise FleetError(
+                    f"Malformed {MANIFEST_FILENAME} at {manifest_path}: "
+                    f"repo '{name}' has non-absolute '{field_name}': "
+                    f"{p!s}. Edit the manifest to use an absolute path."
+                )
         return cls(
             name=name,
             group=group or None,
-            canonical_path=Path(canonical),
-            worktree_path=Path(worktree),
+            canonical_path=canonical_path,
+            worktree_path=worktree_path,
         )
 
     def to_dict(self) -> dict:
@@ -110,7 +120,7 @@ class Manifest:
                 f"task.json missing or unreadable in {workspace}."
             )
         try:
-            raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+            raw = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
         except json.JSONDecodeError as e:
             raise FleetError(
                 f"Malformed task.json in {workspace}: {e}"
@@ -131,6 +141,17 @@ class Manifest:
                 f"task.json in {workspace} is missing the required 'branch' "
                 f"field. Refusing to guess — fix the manifest manually."
             )
+        # Lazy import: validation imports state, which has module-globals
+        # we don't want to touch from manifest's import path. Keeping this
+        # call-site-local also documents that manifest.py is intentionally
+        # free of heavier sibling imports at module scope.
+        from fleet.tasks.validation import validate_branch
+        try:
+            validate_branch(branch, context="task.json branch")
+        except FleetError as e:
+            raise FleetError(
+                f"task.json in {workspace}: {e}"
+            ) from e
         created_at = raw.get("created_at")
         if not isinstance(created_at, str):
             created_at = "?"
