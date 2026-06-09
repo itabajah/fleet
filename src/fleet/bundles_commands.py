@@ -9,11 +9,9 @@ from fleet.bundles_config import (
     expand_bundle_tokens,  # noqa: F401  (re-exported for convenience)
 )
 from fleet.console import cyan, gray, green, yellow
-from fleet.discovery import discover_repos
 from fleet.errors import FleetError
 from fleet.jsonstore import config_lock
 from fleet.state import active_fleet_name, bundles_path
-from fleet.tasks.validation import resolve_repo
 
 
 def _split_csv(raw: str) -> list[str]:
@@ -22,6 +20,8 @@ def _split_csv(raw: str) -> list[str]:
 
 def _warn_unresolved(tokens: list[str]) -> None:
     """Best-effort: warn about tokens that don't resolve right now."""
+    from fleet.discovery import discover_repos
+    from fleet.tasks.validation import resolve_repo
     try:
         all_repos = discover_repos()
     except FleetError:
@@ -99,6 +99,8 @@ def cmd_bundles_show(args: argparse.Namespace) -> int:
     if not members:
         print(gray("  (empty)"))
         return 0
+    from fleet.discovery import discover_repos
+    from fleet.tasks.validation import resolve_repo
     try:
         all_repos = discover_repos()
     except FleetError:

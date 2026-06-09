@@ -17,15 +17,24 @@ This package splits the implementation across:
 from __future__ import annotations
 
 import argparse
+import importlib
+from collections.abc import Callable
 
-from fleet.tasks.edit import cmd_add_repo, cmd_edit, cmd_remove_repo, cmd_rename
-from fleet.tasks.inspect import cmd_info, cmd_list, cmd_path, cmd_sync
-from fleet.tasks.lifecycle import cmd_end, cmd_new
 
-__all__ = [
-    "cmd_new", "cmd_list", "cmd_info", "cmd_sync", "cmd_end", "cmd_path",
-    "cmd_add_repo", "cmd_remove_repo", "cmd_rename", "cmd_edit",
-]
+def _lazy(module: str, attr: str) -> Callable[[argparse.Namespace], int]:
+    """Defer importing a command handler until it actually runs.
+
+    ``cli.build_parser`` (and the completion engine, which introspects the
+    parser on every <Tab>) calls :func:`register`, but the heavy
+    ``task new`` / ``end`` / ``edit`` implementations — git_ops, discovery,
+    worktree, zipfile — must not be imported just to describe the CLI. Each
+    ``set_defaults(func=...)`` points here; the real handler loads on first
+    dispatch.
+    """
+    def _run(args: argparse.Namespace) -> int:
+        handler = getattr(importlib.import_module(module), attr)
+        return handler(args)
+    return _run
 
 
 def register(subparsers: argparse._SubParsersAction,
@@ -56,7 +65,7 @@ def register(subparsers: argparse._SubParsersAction,
     s_new.add_argument("--dry-run", action="store_true",
                        help="validate inputs and print the plan without "
                             "creating anything")
-    s_new.set_defaults(func=cmd_new)
+    s_new.set_defaults(func=_lazy("fleet.tasks.lifecycle", "cmd_new"))
 
     # task list
     s_list = sub.add_parser(
@@ -68,7 +77,7 @@ def register(subparsers: argparse._SubParsersAction,
     s_list.add_argument("--json", dest="as_json", action="store_true",
                         help="emit one JSON object per line on stdout "
                              "(implies --quick)")
-    s_list.set_defaults(func=cmd_list)
+    s_list.set_defaults(func=_lazy("fleet.tasks.inspect", "cmd_list"))
 
     # task info
     s_info = sub.add_parser(
@@ -76,7 +85,7 @@ def register(subparsers: argparse._SubParsersAction,
         help="show detailed status of one task",
     )
     s_info.add_argument("name", help="task name")
-    s_info.set_defaults(func=cmd_info)
+    s_info.set_defaults(func=_lazy("fleet.tasks.inspect", "cmd_info"))
 
     # task sync
     s_sync = sub.add_parser(
@@ -84,7 +93,7 @@ def register(subparsers: argparse._SubParsersAction,
         help="fetch + ff-pull each worktree on its task branch",
     )
     s_sync.add_argument("name", help="task name")
-    s_sync.set_defaults(func=cmd_sync)
+    s_sync.set_defaults(func=_lazy("fleet.tasks.inspect", "cmd_sync"))
 
     # task end
     s_end = sub.add_parser(
@@ -94,7 +103,7 @@ def register(subparsers: argparse._SubParsersAction,
     s_end.add_argument("name", help="task name")
     s_end.add_argument("--force", action="store_true",
                        help="proceed even if a worktree is dirty")
-    s_end.set_defaults(func=cmd_end)
+    s_end.set_defaults(func=_lazy("fleet.tasks.lifecycle", "cmd_end"))
 
     # task add-repo
     s_add = sub.add_parser(
@@ -110,7 +119,7 @@ def register(subparsers: argparse._SubParsersAction,
     s_add.add_argument("--dry-run", action="store_true",
                        help="validate inputs and print the plan without "
                             "creating anything")
-    s_add.set_defaults(func=cmd_add_repo)
+    s_add.set_defaults(func=_lazy("fleet.tasks.edit", "cmd_add_repo"))
 
     # task remove-repo
     s_rm = sub.add_parser(
@@ -124,7 +133,7 @@ def register(subparsers: argparse._SubParsersAction,
                      help="proceed even if a worktree is dirty / unpushed")
     s_rm.add_argument("--dry-run", action="store_true",
                      help="print the plan without removing anything")
-    s_rm.set_defaults(func=cmd_remove_repo)
+    s_rm.set_defaults(func=_lazy("fleet.tasks.edit", "cmd_remove_repo"))
 
     # task rename
     s_ren = sub.add_parser(
@@ -133,7 +142,7 @@ def register(subparsers: argparse._SubParsersAction,
     )
     s_ren.add_argument("old", help="current task name")
     s_ren.add_argument("new", help="new task name")
-    s_ren.set_defaults(func=cmd_rename)
+    s_ren.set_defaults(func=_lazy("fleet.tasks.edit", "cmd_rename"))
 
     # task edit
     s_edit = sub.add_parser(
@@ -146,7 +155,7 @@ def register(subparsers: argparse._SubParsersAction,
                      help="new description text")
     grp.add_argument("--description-file", default=None, metavar="PATH",
                      help="read description from PATH (use '-' for stdin)")
-    s_edit.set_defaults(func=cmd_edit)
+    s_edit.set_defaults(func=_lazy("fleet.tasks.edit", "cmd_edit"))
 
     # task path  (prints absolute workspace path; used by `fleet open`)
     s_path = sub.add_parser(
@@ -154,6 +163,6 @@ def register(subparsers: argparse._SubParsersAction,
         help="print the absolute path to a task workspace",
     )
     s_path.add_argument("name", help="task name")
-    s_path.set_defaults(func=cmd_path)
+    s_path.set_defaults(func=_lazy("fleet.tasks.inspect", "cmd_path"))
 
     return sub

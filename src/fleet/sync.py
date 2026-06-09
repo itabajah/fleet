@@ -9,18 +9,19 @@ they don't re-shell-out to ``git remote get-url``.
 from __future__ import annotations
 
 import argparse
-import subprocess
 import sys
 import threading
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
-from fleet import git_ops
 from fleet.console import cyan, dim, gray, green, magenta, red, yellow
-from fleet.discovery import RepoInfo, repos_to_sync
 from fleet.errors import FleetError
+
+if TYPE_CHECKING:
+    from fleet import git_ops
+    from fleet.discovery import RepoInfo
 
 # Cap to avoid trip-wiring git host abuse rate-limits / exhausting local network.
 _MAX_PARALLEL = 32
@@ -130,6 +131,8 @@ def _gather_host_info(repos: list[RepoInfo]) -> dict[int, _HostInfo]:
     be hashable on its full tuple (it's a frozen dataclass with a ``Path``,
     which IS hashable, but ``id()`` is cheaper and unambiguous).
     """
+    from fleet import git_ops
+
     info: dict[int, _HostInfo] = {}
     for r in repos:
         if not git_ops.is_git_repo(r.path):
@@ -158,6 +161,8 @@ def _run_with_retries(
     backoff sleep so callers can log. Returns the final ``GitResult`` — the
     caller inspects ``.ok`` / :func:`git_ops.is_warning_only`.
     """
+    from fleet import git_ops
+
     delay = _INITIAL_BACKOFF_SECONDS
     last: git_ops.GitResult | None = None
     for attempt in range(1, _MAX_RETRIES + 1):
@@ -184,6 +189,8 @@ def _probe_host(repo: RepoInfo) -> tuple[bool, str]:
     warning-only output as success (Windows reftable / case-insensitive
     advisories etc.).
     """
+    from fleet import git_ops
+
     result = _run_with_retries(lambda: git_ops.ls_remote_head(repo.path))
     if result.ok or git_ops.is_warning_only(result):
         return True, ""
@@ -233,6 +240,8 @@ def _auth_probe(repos: list[RepoInfo],
 
 def _retry_call(label: str, fn, output: list[_Line]) -> git_ops.GitResult:
     """Run ``fn()`` (returns ``GitResult``) with retry on transient failures."""
+    from fleet import git_ops
+
     def _log_retry(attempt: int, max_attempts: int, delay: int) -> None:
         output.append(_Line(
             f"  ⚠ {label} failed (attempt {attempt}/{max_attempts}), "
@@ -251,6 +260,10 @@ def _retry_call(label: str, fn, output: list[_Line]) -> git_ops.GitResult:
 
 def _process_repo(repo: RepoInfo, info: _HostInfo, index: int, dry_run: bool,
                   progress: _Progress) -> _Result:
+    import subprocess
+
+    from fleet import git_ops
+
     res = _Result(index=index, name=repo.name)
     out = res.output
 
@@ -345,6 +358,10 @@ def _process_repo(repo: RepoInfo, info: _HostInfo, index: int, dry_run: bool,
 # ---------------------------------------------------------------------------
 
 def cmd_sync(args: argparse.Namespace) -> int:
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    from fleet.discovery import repos_to_sync
+
     repos = repos_to_sync()
 
     print(cyan("Configuration Stats:"))

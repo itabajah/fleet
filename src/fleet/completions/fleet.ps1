@@ -58,7 +58,35 @@ Register-ArgumentCompleter -Native -CommandName fleet -ScriptBlock {
         $rt = [System.Management.Automation.CompletionResultType]::ParameterValue
     }
 
+    # The engine bakes the whole comma-head into each `--repos` candidate
+    # (e.g. `alpha,beta,gamma`) because bash/zsh replace the entire
+    # whitespace-delimited word. PowerShell is different: it parses
+    # `alpha,beta,` as an ArrayLiteralExpression and sets the completion
+    # replacement span to ONLY the element after the last comma. Splicing
+    # the full candidate there duplicates the head
+    # (`alpha,beta,` + `alpha,beta,gamma` = `alpha,beta,alpha,beta,gamma`).
+    # So strip everything up to and including the last comma of the current
+    # token; PowerShell then fills in just the trailing element. With no
+    # comma in the current token the head is empty and candidates pass
+    # through unchanged.
+    if ($tokens.Count -gt 0) {
+        $currentToken = [string]$tokens[$tokens.Count - 1]
+    } else {
+        $currentToken = ''
+    }
+    $commaIdx = $currentToken.LastIndexOf(',')
+    if ($commaIdx -ge 0) {
+        $head = $currentToken.Substring(0, $commaIdx + 1)
+    } else {
+        $head = ''
+    }
+
     foreach ($c in $cands) {
-        [System.Management.Automation.CompletionResult]::new($c, $c, $rt, $c)
+        if ($head -and $c.StartsWith($head)) {
+            $text = $c.Substring($head.Length)
+        } else {
+            $text = $c
+        }
+        [System.Management.Automation.CompletionResult]::new($text, $text, $rt, $c)
     }
 }

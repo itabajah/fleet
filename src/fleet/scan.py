@@ -26,9 +26,7 @@ from fleet.console import cyan, gray, green, yellow
 from fleet.errors import FleetError
 from fleet.jsonstore import write_json_atomic
 from fleet.paths import REGISTRY_FILENAME
-from fleet.registry_tree import empty_node, expanded_registry
 from fleet.state import find_repos_root, invalidate_registry_cache, load_registry
-from fleet.walker import walk_repos
 
 # ---------------------------------------------------------------------------
 # Build the new structure from disk + existing config
@@ -56,6 +54,8 @@ def _scan_progress_done(found: int) -> None:
 
 def _get_or_create(parent: dict, name: str, existing_node: dict | None) -> dict:
     """Return ``parent[name]``, creating it (and recovering sync/exclude from existing)."""
+    from fleet.registry_tree import empty_node
+
     if name in parent:
         return parent[name]
 
@@ -89,6 +89,8 @@ def _get_or_create(parent: dict, name: str, existing_node: dict | None) -> dict:
 
 def _build_structure(scan_root: Path, expanded_existing: dict) -> tuple[dict, int, int]:
     """Walk disk, drop every repo into the right node. Returns ``(structure, total, new)``."""
+    from fleet.walker import walk_repos
+
     structure: dict = {}
     total = 0
     new_count = 0
@@ -323,6 +325,8 @@ def _count_enabled(structure: dict) -> int:
 # ---------------------------------------------------------------------------
 
 def cmd_scan(_args: argparse.Namespace) -> int:
+    from fleet.registry_tree import expanded_registry
+
     repos_root = find_repos_root()
     target_path = repos_root / REGISTRY_FILENAME
 

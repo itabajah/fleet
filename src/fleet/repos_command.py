@@ -6,9 +6,12 @@ import argparse
 import fnmatch
 import json
 import sys
+from typing import TYPE_CHECKING
 
 from fleet.console import dim, gray
-from fleet.discovery import RepoInfo, discover_repos
+
+if TYPE_CHECKING:
+    from fleet.discovery import RepoInfo
 
 
 def _matches_filter(r: RepoInfo, pattern: str) -> bool:
@@ -24,6 +27,8 @@ def _matches_filter(r: RepoInfo, pattern: str) -> bool:
 
 
 def cmd_repos(args: argparse.Namespace) -> int:
+    from fleet.discovery import discover_repos
+
     repos = discover_repos()
 
     pattern = getattr(args, "filter", None)

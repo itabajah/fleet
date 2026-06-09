@@ -40,9 +40,12 @@ DIRECTIVE_DEFAULT = 0
 DIRECTIVE_NOSPACE = 4
 
 # Hard ceiling on how long dynamic completion may run before we give up and
-# return nothing. A slow disk walk or a hung network mount must never freeze
-# the user's shell waiting on <Tab>.
-_COMPLETION_TIMEOUT_SECONDS = 1.5
+# return nothing. Dynamic domains (fleet/task/repo names) read curated config
+# and do at most a shallow directory listing, so completion should finish in
+# milliseconds; this is a fail-fast backstop against a hung network mount or a
+# wedged filesystem, never a routine wait. It must never freeze the user's
+# shell on <Tab>.
+_COMPLETION_TIMEOUT_SECONDS = 0.5
 
 # ---------------------------------------------------------------------------
 # Parser introspection helpers
@@ -147,18 +150,38 @@ def _task_names(words: Sequence[str]) -> list[str]:
 
 
 def _repo_names(words: Sequence[str]) -> list[str]:
+    """Repo tokens for ``--repos`` completion, sourced from the registry.
+
+    Reads names straight out of the active fleet's ``fleet.json`` rather than
+    walking the disk: completion runs on every <Tab> and a recursive walk of a
+    real repos root is unbounded. The trade-off is that a freshly-cloned repo
+    only autocompletes after ``fleet scan`` records it (typing it by hand
+    still works). Mirrors :class:`fleet.discovery.RepoInfo` naming: the bare
+    leaf plus, for grouped repos, the ``group/path/name`` form.
+    """
     if not _activate_fleet_from_words(words):
         return []
     try:
-        from fleet.discovery import discover_repos
-        repos = discover_repos()
+        from fleet.registry_tree import expanded_registry
+        from fleet.state import load_registry
+        expanded = expanded_registry(load_registry())
         names: set[str] = set()
-        for r in repos:
-            if not r.enabled:
-                continue
-            names.add(r.name)
-            if r.group_path:
-                names.add(r.display_name)
+
+        def _collect(node: dict, prefix: tuple[str, ...], enabled: bool) -> None:
+            node_enabled = enabled and bool(node.get("sync", True))
+            if node_enabled:
+                exclude = set(node.get("exclude") or [])
+                for repo in node.get("repos") or []:
+                    if repo not in exclude:
+                        names.add(repo)
+                        if prefix:
+                            names.add("/".join((*prefix, repo)))
+            for sub_name, sub in (node.get("subfolders") or {}).items():
+                _collect(sub, (*prefix, sub_name), node_enabled)
+
+        for top_name, top_node in expanded.items():
+            base: tuple[str, ...] = () if top_name == "." else (top_name,)
+            _collect(top_node, base, True)
         return sorted(names)
     except Exception:
         return []

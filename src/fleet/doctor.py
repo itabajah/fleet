@@ -18,9 +18,7 @@ from __future__ import annotations
 
 import argparse
 
-from fleet.bundles_config import BundlesConfig
 from fleet.console import cyan, gray, green, red, yellow
-from fleet.discovery import discover_repos
 from fleet.errors import EXIT_OK, EXIT_PARTIAL, FleetError
 from fleet.fleets_config import FleetsConfig, config_path
 from fleet.state import (
@@ -30,8 +28,6 @@ from fleet.state import (
     set_active_fleet,
     tasks_root,
 )
-from fleet.tasks.manifest import Manifest
-from fleet.tasks.validation import resolve_repo
 
 
 class _Report:
@@ -79,6 +75,10 @@ def _check_fleets(cfg: FleetsConfig, report: _Report) -> None:
 def _check_active(cfg: FleetsConfig, override: str | None,
                   report: _Report) -> None:
     """Deep checks (registry parse, bundles, tasks) for one fleet."""
+    from fleet.bundles_config import BundlesConfig
+    from fleet.discovery import discover_repos
+    from fleet.tasks.manifest import Manifest
+    from fleet.tasks.validation import resolve_repo
     try:
         entry = cfg.resolve(override)
     except FleetError as e:

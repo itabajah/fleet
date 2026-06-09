@@ -7,6 +7,7 @@ layout under `tasks_root()` / the configured fleets root.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -238,6 +239,58 @@ class TestRepoNameCompletion:
 
         _, cands = _complete("task", "new", "foo", "--repos", "alpha,beta,")
         assert cands == ["alpha,beta,gamma"]
+
+
+class TestRepoNamesFromRegistry:
+    """_repo_names reads the active fleet's registry (fleet.json), no disk walk."""
+
+    def _setup_fleet(self, tmp_path: Path) -> Path:
+        repos_root = tmp_path / "repos"
+        repos_root.mkdir()
+        cfg = FleetsConfig.load()
+        cfg.add("demo", repos_root)
+        cfg.save()
+        return repos_root
+
+    def test_sources_names_from_registry(self, tmp_path: Path) -> None:
+        repos_root = self._setup_fleet(tmp_path)
+        (repos_root / "fleet.json").write_text(json.dumps({
+            "root": ".",
+            ".": {"sync": True, "repos": ["alpha", "beta"],
+                  "exclude": [], "subfolders": {}},
+            "infra": {"sync": True, "repos": ["gamma"],
+                      "exclude": [], "subfolders": {}},
+        }), encoding="utf-8")
+
+        names = completion._repo_names([])
+        # Top-level repos: bare leaf only.
+        assert "alpha" in names
+        assert "beta" in names
+        # Grouped repo: both bare leaf and group/path/name form.
+        assert "gamma" in names
+        assert "infra/gamma" in names
+
+    def test_disabled_and_excluded_repos_are_skipped(
+        self, tmp_path: Path,
+    ) -> None:
+        repos_root = self._setup_fleet(tmp_path)
+        (repos_root / "fleet.json").write_text(json.dumps({
+            "root": ".",
+            ".": {"sync": True, "repos": ["alpha", "beta"],
+                  "exclude": ["beta"], "subfolders": {}},
+            "vendored": {"sync": False, "repos": ["skipme"],
+                         "exclude": [], "subfolders": {}},
+        }), encoding="utf-8")
+
+        names = completion._repo_names([])
+        assert "alpha" in names
+        assert "beta" not in names          # excluded in parent node
+        assert "skipme" not in names        # under a sync:false node
+        assert "vendored/skipme" not in names
+
+    def test_no_registry_yields_empty(self, tmp_path: Path) -> None:
+        self._setup_fleet(tmp_path)  # fleet configured, but no fleet.json yet
+        assert completion._repo_names([]) == []
 
 
 # ---------------------------------------------------------------------------

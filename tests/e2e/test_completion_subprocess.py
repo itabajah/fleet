@@ -7,6 +7,7 @@ emits the expected glue script.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -223,3 +224,124 @@ def test_bash_completion_function_round_trip(
     cands = set(out.stdout.split())
     # Should contain at least the user-facing top-level commands.
     assert {"sync", "task", "fleets"}.issubset(cands)
+
+
+# ---------------------------------------------------------------------------
+# PowerShell comma-list round trip (regression for --repos a,b,<TAB>)
+# ---------------------------------------------------------------------------
+
+# PowerShell parses `a,b,c` as an ArrayLiteralExpression and sets the
+# completion replacement span to ONLY the element after the last comma. The
+# engine bakes the whole comma-head into each candidate (correct for
+# bash/zsh, which replace the entire word). fleet.ps1 must strip that head so
+# splicing extends the list instead of duplicating it
+# (`alpha,beta,` + `alpha,beta,gamma` = `alpha,beta,alpha,beta,gamma`).
+_PS_ROUND_TRIP = r"""
+$ErrorActionPreference = 'Stop'
+Import-Module '__PSM1__' -Force
+$line = '__LINE__'
+$res = [System.Management.Automation.CommandCompletion]::CompleteInput(
+    $line, $line.Length, $null)
+$texts = @($res.CompletionMatches | ForEach-Object { $_.CompletionText })
+$first = if ($texts.Count -gt 0) { $texts[0] } else { '' }
+$spliced = $line.Substring(0, $res.ReplacementIndex) + $first +
+    $line.Substring($res.ReplacementIndex + $res.ReplacementLength)
+Write-Output ("TEXTS=" + ($texts -join '|'))
+Write-Output ("SPLICED=" + $spliced)
+"""
+
+
+@pytest.mark.skipif(
+    shutil.which("pwsh") is None,
+    reason="pwsh (PowerShell 7+) not installed",
+)
+def test_powershell_repos_comma_no_duplication(
+    fleet_env_sandbox: Path, tmp_path: Path,
+) -> None:
+    """Drive the real Fleet.psm1 completer through TabExpansion2 and assert
+    a comma-separated --repos value extends rather than duplicates its head."""
+    repos_root = tmp_path / "repos"
+    repos_root.mkdir()
+    for name in ("alpha", "beta", "gamma"):
+        d = repos_root / name
+        d.mkdir()
+        (d / ".git").write_text("gitdir: ./fake\n", encoding="utf-8")
+    assert _run("fleets", "add", "pscomma",
+                "--root", str(repos_root)).returncode == 0
+    assert _run("scan", "-F", "pscomma").returncode == 0
+
+    psm1 = Path(__file__).resolve().parents[2] / "Fleet.psm1"
+    assert psm1.is_file(), psm1
+    line = "fleet task new t -F pscomma --repos alpha,beta,"
+    script = (
+        _PS_ROUND_TRIP
+        .replace("__PSM1__", psm1.as_posix())
+        .replace("__LINE__", line)
+    )
+
+    env = os.environ.copy()
+    proc = subprocess.run(
+        ["pwsh", "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        env=env,
+    )
+    _run("fleets", "remove", "pscomma")
+
+    assert proc.returncode == 0, proc.stderr
+    out = proc.stdout
+    # Candidate texts are tails only — no baked-in comma head.
+    assert "TEXTS=gamma" in out, out
+    # Splicing the first match extends the list; the head is not duplicated.
+    assert (
+        "SPLICED=fleet task new t -F pscomma --repos alpha,beta,gamma" in out
+    ), out
+    assert "alpha,beta,alpha" not in out
+
+
+# ---------------------------------------------------------------------------
+# Import-cost guard: build_parser runs on every <Tab> and must stay cheap
+# ---------------------------------------------------------------------------
+
+# The completion engine introspects the argparse tree built by
+# ``fleet.cli.build_parser`` on every keystroke. Describing the CLI must NOT
+# drag in the heavy command implementations — git_ops, the disk walker +
+# discovery, the tasks worktree/manifest subtree, concurrent.futures, zipfile.
+# Those load lazily on actual dispatch. If any of them creeps back onto a
+# module top-level import, this guard fails before it can slow down <Tab>.
+_FORBIDDEN_ON_PARSER_BUILD = [
+    "fleet.discovery",
+    "fleet.git_ops",
+    "fleet.walker",
+    "fleet.registry_tree",
+    "fleet.tasks.manifest",
+    "fleet.tasks.validation",
+    "fleet.tasks.status",
+    "fleet.tasks.worktree",
+    "fleet.tasks.lifecycle",
+    "fleet.tasks.edit",
+    "fleet.tasks.inspect",
+    "concurrent.futures",
+    "zipfile",
+]
+
+
+def test_build_parser_stays_lean() -> None:
+    """Guard the completion hot path: build_parser imports nothing heavy."""
+    script = (
+        "import sys, json\n"
+        "import fleet.cli\n"
+        "fleet.cli.build_parser()\n"
+        f"forbidden = {_FORBIDDEN_ON_PARSER_BUILD!r}\n"
+        "print(json.dumps([m for m in forbidden if m in sys.modules]))\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        env=os.environ.copy(),
+    )
+    assert proc.returncode == 0, proc.stderr
+    leaked = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert leaked == [], (
+        "build_parser pulled heavy modules onto the completion hot path: "
+        f"{leaked}. Keep their imports inside handler bodies."
+    )
