@@ -332,16 +332,16 @@ def test_config_lock_falls_back_with_warning(
     """A stale lock from a crashed peer must not wedge the CLI forever:
     after the timeout we proceed without the lock but emit a stderr warning
     so the user can notice and clean up."""
-    from fleet import fleets_config
+    from fleet import jsonstore
 
-    monkeypatch.setattr(fleets_config, "_LOCK_TIMEOUT_SECONDS", 0.05)
-    monkeypatch.setattr(fleets_config, "_LOCK_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(jsonstore, "_LOCK_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(jsonstore, "_LOCK_POLL_SECONDS", 0.01)
 
     target = tmp_path / "fleets.json"
     lock = target.with_suffix(target.suffix + ".lock")
     lock.touch()  # pre-existing stale lock
 
-    with fleets_config._config_lock(target):
+    with jsonstore.config_lock(target):
         pass
 
     err = capsys.readouterr().err

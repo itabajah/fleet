@@ -1,102 +1,17 @@
-"""Task name validation + ``--repos`` token resolution + branch-name builder."""
+"""``--repos`` token resolution + task branch-name builder."""
 
 from __future__ import annotations
 
 import difflib
-import re
 from typing import TYPE_CHECKING
 
+from fleet.bundles_config import expand_bundle_tokens
 from fleet.discovery import RepoInfo
 from fleet.errors import FleetError
 from fleet.state import branch_config, require_active_fleet
 
 if TYPE_CHECKING:
     from fleet.tasks.manifest import Manifest, RepoEntry
-
-# Filesystem-safe AND valid as a git branch suffix. The regex enforces the
-# character set; ``validate_task_name`` additionally rules out the
-# git-ref-format edge cases the regex can't express (``..``, leading/trailing
-# ``.``, ``.lock`` suffix, ``@{``).
-_TASK_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-]{0,63}$")
-
-# Characters git itself forbids inside any ref segment (see git-check-ref-format).
-_BAD_BRANCH_CHARS = re.compile(r"[\s~^:?*\[\\\x00-\x1f\x7f]")
-
-# Names Windows reserves for legacy DOS devices: a directory or branch leaf
-# matching one (case-insensitively, with or without an extension) can't be
-# created on Windows and confuses tooling on every OS. Rejected on all
-# platforms so a task created on Linux can still be opened on Windows.
-_WINDOWS_RESERVED = frozenset({
-    "CON", "PRN", "AUX", "NUL",
-    *(f"COM{i}" for i in range(1, 10)),
-    *(f"LPT{i}" for i in range(1, 10)),
-})
-
-
-def validate_task_name(name: str) -> None:
-    """Raise :class:`FleetError` if ``name`` isn't safe to use everywhere."""
-    if not _TASK_NAME_RE.match(name):
-        raise FleetError(
-            f"Invalid task name '{name}'. "
-            "Use letters, digits, '.', '_', '-' (1-64 chars, must start "
-            "with a letter or digit)."
-        )
-    if (".." in name
-            or name.startswith(".") or name.endswith(".")
-            or name.endswith(".lock") or "@{" in name):
-        raise FleetError(
-            f"Invalid task name '{name}'. Git would refuse the resulting "
-            "branch (no '..', no leading/trailing '.', no '.lock' suffix, "
-            "no '@{')."
-        )
-    # A trailing space is silently stripped by Windows when creating a
-    # directory, which would desync the workspace name from the branch
-    # suffix. The regex already blocks spaces, but guard explicitly in case
-    # the character set is ever widened.
-    if name != name.strip():
-        raise FleetError(
-            f"Invalid task name '{name}': leading/trailing whitespace."
-        )
-    # Reject reserved device names, with or without an extension
-    # (``CON``, ``con.txt``, ``LPT1`` ...).
-    stem = name.split(".", 1)[0].upper()
-    if stem in _WINDOWS_RESERVED:
-        raise FleetError(
-            f"Invalid task name '{name}': '{stem}' is a reserved device name "
-            "on Windows. Pick a different name."
-        )
-
-
-def validate_branch(branch: str, *, context: str = "branch") -> None:
-    """Raise :class:`FleetError` if ``branch`` isn't a valid git ref name.
-
-    Defends against hand-edited manifests whose ``branch`` field would
-    only fail much later, deep inside a git invocation. Catches empties,
-    leading dashes (would parse as a CLI flag), git-special chars, and
-    the same ref-format edge cases as :func:`validate_task_name`.
-    """
-    if not branch:
-        raise FleetError(f"Invalid {context}: empty.")
-    if branch.startswith("-"):
-        raise FleetError(
-            f"Invalid {context} '{branch}': must not start with '-' "
-            "(would parse as a CLI flag)."
-        )
-    if _BAD_BRANCH_CHARS.search(branch):
-        raise FleetError(
-            f"Invalid {context} '{branch}': contains whitespace or one of "
-            "the characters git forbids in refs (~ ^ : ? * [ \\ or control)."
-        )
-    if (".." in branch
-            or branch.startswith(".") or branch.endswith(".")
-            or branch.endswith(".lock") or "@{" in branch
-            or branch.startswith("/") or branch.endswith("/")
-            or "//" in branch):
-        raise FleetError(
-            f"Invalid {context} '{branch}': violates git ref-format rules "
-            "(no '..', no leading/trailing '.' or '/', no '.lock' suffix, "
-            "no '@{', no '//')."
-        )
 
 
 def task_branch(name: str) -> str:
@@ -202,3 +117,49 @@ def require_repo_in_task(token: str, manifest: Manifest) -> RepoEntry:
         f"Repo '{token}' is not in task '{manifest.name}'. "
         f"Members: {members}."
     )
+
+
+def split_repo_tokens(raw: str) -> list[str]:
+    """Split a ``--repos`` CSV, expand ``@bundle`` refs, require non-empty.
+
+    Raises :class:`FleetError` if the list is empty before or after bundle
+    expansion (an empty bundle would otherwise silently select nothing).
+    """
+    tokens = [t.strip() for t in raw.split(",") if t.strip()]
+    if not tokens:
+        raise FleetError("--repos requires at least one repo name.")
+    tokens = expand_bundle_tokens(tokens)
+    if not tokens:
+        raise FleetError("--repos requires at least one repo name.")
+    return tokens
+
+
+def select_repos(
+    tokens: list[str],
+    all_repos: list[RepoInfo],
+    *,
+    already_in_task: set[tuple[str, str]] | None = None,
+    task_name: str | None = None,
+) -> list[RepoInfo]:
+    """Resolve ``tokens`` to repos in order, dropping in-list duplicates.
+
+    ``already_in_task`` (keyed by ``(group_path, name)``) makes a token that
+    is already a task member a hard error naming ``task_name`` — used by
+    ``add-repo``. ``task new`` passes neither and so allows any resolvable repo.
+    """
+    already = already_in_task or set()
+    seen: set[tuple[str, str]] = set()
+    chosen: list[RepoInfo] = []
+    for tok in tokens:
+        repo = resolve_repo(tok, all_repos)
+        key = (repo.group_path, repo.name)
+        if key in already:
+            raise FleetError(
+                f"Repo '{repo.display_name}' is already in task '{task_name}'."
+            )
+        if key in seen:
+            print(f"note: ignoring duplicate '{tok}'")
+            continue
+        seen.add(key)
+        chosen.append(repo)
+    return chosen

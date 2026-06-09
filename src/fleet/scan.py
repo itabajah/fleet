@@ -19,14 +19,12 @@ Output shape::
 from __future__ import annotations
 
 import argparse
-import contextlib
-import json
-import os
 import sys
 from pathlib import Path
 
 from fleet.console import cyan, gray, green, yellow
 from fleet.errors import FleetError
+from fleet.jsonstore import write_json_atomic
 from fleet.paths import REGISTRY_FILENAME
 from fleet.registry_tree import empty_node, expanded_registry
 from fleet.state import find_repos_root, invalidate_registry_cache, load_registry
@@ -320,20 +318,6 @@ def _count_enabled(structure: dict) -> int:
     return total
 
 
-def _atomic_write_json(path: Path, payload: dict) -> None:
-    """Write ``payload`` to ``path`` via a temp-file + rename so a crash
-    mid-write can't truncate the existing file."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    try:
-        os.replace(tmp, path)
-    except OSError:
-        with contextlib.suppress(OSError):
-            tmp.unlink()
-        raise
-
-
 # ---------------------------------------------------------------------------
 # Public command
 # ---------------------------------------------------------------------------
@@ -368,7 +352,7 @@ def cmd_scan(_args: argparse.Namespace) -> int:
     _cleanup(structure)
 
     final: dict = {"root": config_root, **structure}
-    _atomic_write_json(target_path, final)
+    write_json_atomic(target_path, final)
     # We just rewrote fleet.json; drop the in-process cache so any later
     # load_registry() in the same run (tests re-scan twice) reads fresh.
     invalidate_registry_cache()

@@ -9,7 +9,6 @@ time; downstream code can rely on the dataclass shape.
 from __future__ import annotations
 
 import contextlib
-import json
 import os
 import time
 from collections.abc import Iterator
@@ -18,6 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fleet.errors import FleetError
+from fleet.jsonstore import read_json, write_json_atomic
+from fleet.refnames import validate_branch
 
 MANIFEST_FILENAME = "task.json"
 LOCK_FILENAME = ".task.lock"
@@ -189,12 +190,7 @@ class Manifest:
             raise FleetError(
                 f"task.json missing or unreadable in {workspace}."
             )
-        try:
-            raw = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
-        except json.JSONDecodeError as e:
-            raise FleetError(
-                f"Malformed task.json in {workspace}: {e}"
-            ) from e
+        raw = read_json(manifest_path, what=f"task.json in {workspace}")
         if not isinstance(raw, dict):
             raise FleetError(
                 f"Malformed task.json in {workspace}: top-level value is "
@@ -214,11 +210,6 @@ class Manifest:
                 f"task.json in {workspace} is missing the required 'branch' "
                 f"field. Refusing to guess — fix the manifest manually."
             )
-        # Lazy import: validation imports state, which has module-globals
-        # we don't want to touch from manifest's import path. Keeping this
-        # call-site-local also documents that manifest.py is intentionally
-        # free of heavier sibling imports at module scope.
-        from fleet.tasks.validation import validate_branch
         try:
             validate_branch(branch, context="task.json branch")
         except FleetError as e:
@@ -275,15 +266,9 @@ class Manifest:
             "description": self.description,
             "repos": [r.to_dict() for r in self.repos],
         }
-        tmp = manifest_path.with_suffix(manifest_path.suffix + ".tmp")
         try:
-            tmp.write_text(
-                json.dumps(payload, indent=2) + "\n", encoding="utf-8",
-            )
-            os.replace(tmp, manifest_path)
+            write_json_atomic(manifest_path, payload)
         except OSError as e:
-            with contextlib.suppress(OSError):
-                tmp.unlink()
             raise FleetError(
                 f"Failed to write {manifest_path}: {e}. "
                 f"If the file is open elsewhere (VS Code?), close it and retry."

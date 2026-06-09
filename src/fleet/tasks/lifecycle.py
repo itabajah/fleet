@@ -12,13 +12,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fleet import git_ops
-from fleet.bundles_config import expand_bundle_tokens
 from fleet.console import yellow
 from fleet.discovery import RepoInfo, discover_repos
 from fleet.errors import FleetError
+from fleet.refnames import validate_task_name
 from fleet.state import archive_root, tasks_root
 from fleet.tasks.manifest import Manifest, RepoEntry, now_iso
-from fleet.tasks.validation import resolve_repo, task_branch, validate_task_name
+from fleet.tasks.status import block_or_warn_dirty, repo_status, unpushed_warning
+from fleet.tasks.validation import select_repos, split_repo_tokens, task_branch
 from fleet.tasks.worktree import (
     add_worktree,
     assert_no_leaf_collision,
@@ -43,27 +44,13 @@ def cmd_new(args: argparse.Namespace) -> int:
             f"Pick a different name or `fleet task end {name}` first."
         )
 
-    repo_tokens = [t.strip() for t in args.repos.split(",") if t.strip()]
-    if not repo_tokens:
-        raise FleetError("--repos requires at least one repo name.")
-    repo_tokens = expand_bundle_tokens(repo_tokens)
-    if not repo_tokens:
-        raise FleetError("--repos requires at least one repo name.")
+    repo_tokens = split_repo_tokens(args.repos)
 
     all_repos = discover_repos()
     if not all_repos:
         raise FleetError("No repos discovered under the configured Repos root.")
 
-    seen: set[tuple[str, str]] = set()
-    chosen: list[RepoInfo] = []
-    for tok in repo_tokens:
-        repo = resolve_repo(tok, all_repos)
-        key = (repo.group_path, repo.name)
-        if key in seen:
-            print(f"note: ignoring duplicate '{tok}'")
-            continue
-        seen.add(key)
-        chosen.append(repo)
+    chosen = select_repos(repo_tokens, all_repos)
 
     # Worktree paths are `<workspace>/<repo.name>`, so two repos that
     # resolve to the same leaf name (e.g. `foo` and `bar/foo`) would
@@ -224,33 +211,14 @@ def cmd_end(args: argparse.Namespace) -> int:
             print(f"note: worktree '{r.name}' already gone ({r.worktree_path})")
             continue
         live_worktrees.append(r)
-        if git_ops.is_dirty(r.worktree_path):
+        st = repo_status(r.worktree_path, branch)
+        if st.dirty:
             dirty.append(r.name)
-        n = git_ops.unpushed_count(r.worktree_path, branch)
-        if n is None:
-            unpushed_warnings.append(
-                f"  {r.name}: branch '{branch}' was never pushed"
-            )
-        elif n > 0:
-            unpushed_warnings.append(
-                f"  {r.name}: {n} unpushed commit(s) on '{branch}'"
-            )
+        warn = unpushed_warning(r.name, branch, st.unpushed)
+        if warn is not None:
+            unpushed_warnings.append(warn)
 
-    if dirty and not args.force:
-        raise FleetError(
-            "Refusing to end — uncommitted changes in: "
-            + ", ".join(dirty)
-            + "\nCommit/stash, or re-run with --force."
-        )
-    if dirty and args.force:
-        print(f"WARN: --force ignoring uncommitted changes in: "
-              f"{', '.join(dirty)}")
-    if unpushed_warnings:
-        print("WARN: unpushed work that will become orphan-able once "
-              "the worktree is removed:")
-        for line in unpushed_warnings:
-            print(line)
-        print("(branch stays in the canonical repo, so this is recoverable.)")
+    block_or_warn_dirty(dirty, unpushed_warnings, force=args.force, action="end")
 
     archive_path = _archive_workspace(workspace, name)
     print(f"Archived metadata -> {archive_path}")

@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
@@ -144,6 +145,37 @@ def _gather_host_info(repos: list[RepoInfo]) -> dict[int, _HostInfo]:
     return info
 
 
+def _run_with_retries(
+    fn: Callable[[], git_ops.GitResult],
+    *,
+    on_retry: Callable[[int, int, int], None] | None = None,
+) -> git_ops.GitResult:
+    """Call ``fn`` until it succeeds, is warning-only, or retries run out.
+
+    Retries only on transient errors (network blips), sleeping with
+    exponential backoff capped at ``_MAX_BACKOFF_SECONDS``. ``on_retry`` is
+    invoked as ``on_retry(attempt, max_attempts, delay)`` just before each
+    backoff sleep so callers can log. Returns the final ``GitResult`` — the
+    caller inspects ``.ok`` / :func:`git_ops.is_warning_only`.
+    """
+    delay = _INITIAL_BACKOFF_SECONDS
+    last: git_ops.GitResult | None = None
+    for attempt in range(1, _MAX_RETRIES + 1):
+        result = fn()
+        last = result
+        if result.ok or git_ops.is_warning_only(result):
+            return result
+        if attempt < _MAX_RETRIES and git_ops.is_transient_error(result):
+            if on_retry is not None:
+                on_retry(attempt, _MAX_RETRIES, delay)
+            time.sleep(delay)
+            delay = min(delay * 2, _MAX_BACKOFF_SECONDS)
+            continue
+        break
+    assert last is not None  # _MAX_RETRIES >= 1
+    return last
+
+
 def _probe_host(repo: RepoInfo) -> tuple[bool, str]:
     """Run the auth probe for one repo. Returns ``(ok, error_text)``.
 
@@ -152,19 +184,10 @@ def _probe_host(repo: RepoInfo) -> tuple[bool, str]:
     warning-only output as success (Windows reftable / case-insensitive
     advisories etc.).
     """
-    delay = _INITIAL_BACKOFF_SECONDS
-    last_err = ""
-    for attempt in range(1, _MAX_RETRIES + 1):
-        result = git_ops.ls_remote_head(repo.path)
-        if result.ok or git_ops.is_warning_only(result):
-            return True, ""
-        last_err = (result.stderr or result.stdout).strip()
-        if attempt < _MAX_RETRIES and git_ops.is_transient_error(result):
-            time.sleep(delay)
-            delay = min(delay * 2, _MAX_BACKOFF_SECONDS)
-            continue
-        break
-    return False, last_err
+    result = _run_with_retries(lambda: git_ops.ls_remote_head(repo.path))
+    if result.ok or git_ops.is_warning_only(result):
+        return True, ""
+    return False, (result.stderr or result.stdout).strip()
 
 
 def _auth_probe(repos: list[RepoInfo],
@@ -210,32 +233,20 @@ def _auth_probe(repos: list[RepoInfo],
 
 def _retry_call(label: str, fn, output: list[_Line]) -> git_ops.GitResult:
     """Run ``fn()`` (returns ``GitResult``) with retry on transient failures."""
-    delay = _INITIAL_BACKOFF_SECONDS
-    last: git_ops.GitResult | None = None
-    for attempt in range(1, _MAX_RETRIES + 1):
-        result = fn()
-        last = result
-        if result.ok:
-            return result
-        if git_ops.is_warning_only(result):
-            output.append(_Line(
-                f"  ⚠ {label} succeeded with filesystem warnings (safe to ignore)",
-                "gray",
-            ))
-            return result
+    def _log_retry(attempt: int, max_attempts: int, delay: int) -> None:
+        output.append(_Line(
+            f"  ⚠ {label} failed (attempt {attempt}/{max_attempts}), "
+            f"retrying in {delay}s...",
+            "yellow",
+        ))
 
-        if attempt < _MAX_RETRIES and git_ops.is_transient_error(result):
-            output.append(_Line(
-                f"  ⚠ {label} failed (attempt {attempt}/{_MAX_RETRIES}), "
-                f"retrying in {delay}s...",
-                "yellow",
-            ))
-            time.sleep(delay)
-            delay = min(delay * 2, _MAX_BACKOFF_SECONDS)
-            continue
-        break
-    assert last is not None  # _MAX_RETRIES >= 1
-    return last
+    result = _run_with_retries(fn, on_retry=_log_retry)
+    if git_ops.is_warning_only(result) and not result.ok:
+        output.append(_Line(
+            f"  ⚠ {label} succeeded with filesystem warnings (safe to ignore)",
+            "gray",
+        ))
+    return result
 
 
 def _process_repo(repo: RepoInfo, info: _HostInfo, index: int, dry_run: bool,

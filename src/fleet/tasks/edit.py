@@ -16,17 +16,18 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from fleet import git_ops
-from fleet.bundles_config import expand_bundle_tokens
 from fleet.console import yellow
 from fleet.discovery import RepoInfo, discover_repos
 from fleet.errors import FleetError
+from fleet.refnames import validate_task_name
 from fleet.state import tasks_root
 from fleet.tasks.manifest import Manifest, RepoEntry, task_lock
+from fleet.tasks.status import block_or_warn_dirty, repo_status, unpushed_warning
 from fleet.tasks.validation import (
     require_repo_in_task,
-    resolve_repo,
+    select_repos,
+    split_repo_tokens,
     task_branch,
-    validate_task_name,
 )
 from fleet.tasks.worktree import (
     add_worktree,
@@ -37,16 +38,6 @@ from fleet.tasks.worktree import (
 # ---------------------------------------------------------------------------
 # shared helpers
 # ---------------------------------------------------------------------------
-
-def _split_repo_tokens(raw: str) -> list[str]:
-    tokens = [t.strip() for t in raw.split(",") if t.strip()]
-    if not tokens:
-        raise FleetError("--repos requires at least one repo name.")
-    tokens = expand_bundle_tokens(tokens)
-    if not tokens:
-        raise FleetError("--repos requires at least one repo name.")
-    return tokens
-
 
 @contextlib.contextmanager
 def _locked_task(name: str) -> Iterator[tuple[Path, Manifest]]:
@@ -71,7 +62,7 @@ def _locked_task(name: str) -> Iterator[tuple[Path, Manifest]]:
 def cmd_add_repo(args: argparse.Namespace) -> int:
     name: str = args.name
     with _locked_task(name) as (workspace, manifest):
-        tokens = _split_repo_tokens(args.repos)
+        tokens = split_repo_tokens(args.repos)
 
         all_repos = discover_repos()
         if not all_repos:
@@ -80,20 +71,9 @@ def cmd_add_repo(args: argparse.Namespace) -> int:
         existing_keys = {(r.group or "", r.name) for r in manifest.repos}
         existing_leaves = {r.name for r in manifest.repos}
 
-        seen: set[tuple[str, str]] = set()
-        chosen: list[RepoInfo] = []
-        for tok in tokens:
-            repo = resolve_repo(tok, all_repos)
-            key = (repo.group_path, repo.name)
-            if key in existing_keys:
-                raise FleetError(
-                    f"Repo '{repo.display_name}' is already in task '{name}'."
-                )
-            if key in seen:
-                print(f"note: ignoring duplicate '{tok}'")
-                continue
-            seen.add(key)
-            chosen.append(repo)
+        chosen = select_repos(
+            tokens, all_repos, already_in_task=existing_keys, task_name=name,
+        )
 
         # Leaf collision: among new repos, and against existing manifest entries.
         # Case-insensitive on Windows/macOS so 'Foo' vs 'foo' is caught before
@@ -194,7 +174,7 @@ def _append_context_repos(workspace: Path, added: list[RepoInfo]) -> None:
 def cmd_remove_repo(args: argparse.Namespace) -> int:
     name: str = args.name
     with _locked_task(name) as (workspace, manifest):
-        tokens = _split_repo_tokens(args.repos)
+        tokens = split_repo_tokens(args.repos)
 
         targets: list[RepoEntry] = []
         seen: set[str] = set()
@@ -213,33 +193,15 @@ def cmd_remove_repo(args: argparse.Namespace) -> int:
         for r in targets:
             if not r.worktree_path.is_dir():
                 continue
-            if git_ops.is_dirty(r.worktree_path):
+            st = repo_status(r.worktree_path, branch)
+            if st.dirty:
                 dirty.append(r.name)
-            n = git_ops.unpushed_count(r.worktree_path, branch)
-            if n is None:
-                unpushed_warnings.append(
-                    f"  {r.name}: branch '{branch}' was never pushed"
-                )
-            elif n > 0:
-                unpushed_warnings.append(
-                    f"  {r.name}: {n} unpushed commit(s) on '{branch}'"
-                )
+            warn = unpushed_warning(r.name, branch, st.unpushed)
+            if warn is not None:
+                unpushed_warnings.append(warn)
 
-        if dirty and not args.force:
-            raise FleetError(
-                "Refusing to remove — uncommitted changes in: "
-                + ", ".join(dirty)
-                + "\nCommit/stash, or re-run with --force."
-            )
-        if dirty and args.force:
-            print(f"WARN: --force ignoring uncommitted changes in: "
-                  f"{', '.join(dirty)}")
-        if unpushed_warnings:
-            print("WARN: unpushed work that will become orphan-able once "
-                  "the worktree is removed:")
-            for line in unpushed_warnings:
-                print(line)
-            print("(branch stays in the canonical repo, so this is recoverable.)")
+        block_or_warn_dirty(dirty, unpushed_warnings,
+                            force=args.force, action="remove")
 
         print(f"Removing {len(targets)} repo(s) from task '{name}':")
         for r in targets:

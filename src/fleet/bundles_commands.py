@@ -11,7 +11,7 @@ from fleet.bundles_config import (
 from fleet.console import cyan, gray, green, yellow
 from fleet.discovery import discover_repos
 from fleet.errors import FleetError
-from fleet.fleets_config import _config_lock
+from fleet.jsonstore import config_lock
 from fleet.state import active_fleet_name, bundles_path
 from fleet.tasks.validation import resolve_repo
 
@@ -54,7 +54,7 @@ def cmd_bundles_add(args: argparse.Namespace) -> int:
     if not tokens:
         raise FleetError("--repos requires at least one repo token.")
 
-    with _config_lock(bundles_path()):
+    with config_lock(bundles_path()):
         cfg = BundlesConfig.load()
         existed = args.name in cfg.bundles
         stored = cfg.add(args.name, tokens, force=args.force)
@@ -120,7 +120,7 @@ def cmd_bundles_show(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 def cmd_bundles_remove(args: argparse.Namespace) -> int:
-    with _config_lock(bundles_path()):
+    with config_lock(bundles_path()):
         cfg = BundlesConfig.load()
         cfg.remove(args.name)
         cfg.save()
@@ -129,7 +129,7 @@ def cmd_bundles_remove(args: argparse.Namespace) -> int:
 
 
 def cmd_bundles_rename(args: argparse.Namespace) -> int:
-    with _config_lock(bundles_path()):
+    with config_lock(bundles_path()):
         cfg = BundlesConfig.load()
         cfg.rename(args.old, args.new)
         cfg.save()
@@ -149,7 +149,7 @@ def cmd_bundles_edit(args: argparse.Namespace) -> int:
             "bundles edit needs --add TOKENS and/or --remove TOKENS."
         )
 
-    with _config_lock(bundles_path()):
+    with config_lock(bundles_path()):
         cfg = BundlesConfig.load()
         current = cfg.get(args.name)
         not_member = [t for t in remove_tokens if t not in current]

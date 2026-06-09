@@ -12,12 +12,12 @@ must call :func:`reset_state` between cases (the autouse fixture does this).
 
 from __future__ import annotations
 
-import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
 
 from fleet.errors import FleetError
+from fleet.jsonstore import read_json
 from fleet.paths import BUNDLES_FILENAME, REGISTRY_FILENAME, tasks_root_base
 
 
@@ -151,10 +151,7 @@ def load_registry() -> dict:
         _registry_cache = {}
         _registry_cache_path = path
         return _registry_cache
-    try:
-        data = json.loads(path.read_text(encoding="utf-8-sig"))
-    except json.JSONDecodeError as e:
-        raise FleetError(f"Malformed registry at {path}: {e}") from e
+    data = read_json(path, what=f"registry at {path}")
     _registry_cache = data
     _registry_cache_path = path
     return data

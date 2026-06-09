@@ -14,9 +14,9 @@ import sys
 from fleet import git_ops
 from fleet.console import cyan, dim, green, red, yellow
 from fleet.errors import FleetError
+from fleet.refnames import validate_task_name
 from fleet.state import active_fleet_name, tasks_root
 from fleet.tasks.manifest import Manifest
-from fleet.tasks.validation import validate_task_name
 
 # ---------------------------------------------------------------------------
 # task list

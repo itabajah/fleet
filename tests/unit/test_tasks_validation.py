@@ -8,12 +8,11 @@ import pytest
 
 from fleet.discovery import RepoInfo
 from fleet.errors import FleetError
+from fleet.refnames import validate_branch, validate_task_name
 from fleet.state import BranchConfig, set_active_fleet
 from fleet.tasks.validation import (
     resolve_repo,
     task_branch,
-    validate_branch,
-    validate_task_name,
 )
 
 # ---------------------------------------------------------------------------

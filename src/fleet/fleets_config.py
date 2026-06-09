@@ -20,67 +20,18 @@ current default falls back to the alphabetically-first remaining fleet, or
 
 from __future__ import annotations
 
-import contextlib
-import json
 import os
 import re
 import sys
-import time
-from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from fleet.errors import FleetError
+from fleet.jsonstore import read_json, write_json_atomic
+from fleet.refnames import has_ref_format_violation, validate_branch
 from fleet.state import BranchConfig
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-]{0,31}$")
-
-_LOCK_TIMEOUT_SECONDS = 5.0
-_LOCK_POLL_SECONDS = 0.05
-
-
-@contextlib.contextmanager
-def _config_lock(path: Path) -> Iterator[None]:
-    """Cross-process advisory lock around the fleets config.
-
-    Uses an exclusive-create sidecar (``<path>.lock``) so concurrent
-    ``fleet fleets add`` invocations serialize their read-modify-write
-    rather than losing updates. Best-effort: gives up after
-    ``_LOCK_TIMEOUT_SECONDS`` and proceeds anyway, so a stale lock from a
-    crashed process never permanently wedges the CLI.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = path.with_suffix(path.suffix + ".lock")
-    deadline = time.monotonic() + _LOCK_TIMEOUT_SECONDS
-    fd: int | None = None
-    while True:
-        try:
-            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            break
-        except FileExistsError:
-            if time.monotonic() >= deadline:
-                # Stale lock fallback: proceed without locking. Two writers
-                # can still collide here, but better than hanging forever.
-                # Surface the situation so the user can clean up a stale
-                # lock from a crashed peer process.
-                print(
-                    f"WARN: acquired {path.name} without lock after "
-                    f"{_LOCK_TIMEOUT_SECONDS:g}s waiting on {lock_path}; "
-                    f"concurrent writers may race. "
-                    f"Delete the lock file if no other fleet process is running.",
-                    file=sys.stderr,
-                )
-                fd = None
-                break
-            time.sleep(_LOCK_POLL_SECONDS)
-    try:
-        yield
-    finally:
-        if fd is not None:
-            with contextlib.suppress(OSError):
-                os.close(fd)
-        with contextlib.suppress(OSError):
-            lock_path.unlink()
 
 
 def _config_file() -> Path:
@@ -127,10 +78,7 @@ class FleetsConfig:
     def load(cls) -> FleetsConfig:
         path = _config_file()
         if path.is_file():
-            try:
-                data = json.loads(path.read_text(encoding="utf-8-sig"))
-            except json.JSONDecodeError as e:
-                raise FleetError(f"Malformed fleets config at {path}: {e}") from e
+            data = read_json(path, what=f"fleets config at {path}")
             fleets: dict[str, FleetEntry] = {}
             raw = data.get("fleets") if isinstance(data, dict) else None
             if isinstance(raw, dict):
@@ -153,7 +101,6 @@ class FleetsConfig:
 
     def save(self) -> None:
         path = _config_file()
-        path.parent.mkdir(parents=True, exist_ok=True)
         data: dict[str, object] = {
             "default": self.default,
             "fleets": {
@@ -169,14 +116,7 @@ class FleetsConfig:
                 "prefix": self.branch.prefix,
                 "scoped": self.branch.scoped,
             }
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-        try:
-            os.replace(tmp, path)
-        except OSError:
-            with contextlib.suppress(OSError):
-                tmp.unlink()
-            raise
+        write_json_atomic(path, data)
 
     # ------------------------------ mutators ---------------------------------
 
@@ -286,9 +226,7 @@ def _validate_fleet_name(name: str) -> None:
             f"Invalid fleet name '{name}'. Must start with a letter/digit "
             "and contain only A-Z, a-z, 0-9, '.', '_', '-' (max 32 chars)."
         )
-    if (".." in name
-            or name.startswith(".") or name.endswith(".")
-            or name.endswith(".lock") or "@{" in name):
+    if has_ref_format_violation(name):
         raise FleetError(
             f"Invalid fleet name '{name}': would produce an invalid git "
             "ref (no '..', no leading/trailing '.', no '.lock' suffix, "
@@ -333,10 +271,6 @@ def _parse_branch_config(data: object, path: Path) -> BranchConfig:
 
 def _validate_branch_config(cfg: BranchConfig, path: Path) -> None:
     """Ensure a branch rendered from ``cfg`` passes git-ref-safety checks."""
-    # Lazy import: validation imports state, which is already imported here at
-    # module scope — keep validation off this module's import path until it's
-    # actually needed.
-    from fleet.tasks.validation import validate_branch
     # Representative segments (each independently valid) so any failure is
     # attributable to ``prefix`` / ``scoped``, not to the sample fleet/task.
     sample = (f"{cfg.prefix}/fleet/task" if cfg.scoped

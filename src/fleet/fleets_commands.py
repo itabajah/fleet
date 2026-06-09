@@ -6,7 +6,8 @@ import argparse
 from pathlib import Path
 
 from fleet.console import cyan, gray, green, yellow
-from fleet.fleets_config import FleetsConfig, _config_lock, config_path
+from fleet.fleets_config import FleetsConfig, config_path
+from fleet.jsonstore import config_lock
 
 
 def cmd_fleets_list(_args: argparse.Namespace) -> int:
@@ -29,7 +30,7 @@ def cmd_fleets_list(_args: argparse.Namespace) -> int:
 
 
 def cmd_fleets_add(args: argparse.Namespace) -> int:
-    with _config_lock(config_path()):
+    with config_lock(config_path()):
         cfg = FleetsConfig.load()
         root = Path(args.root) if args.root else Path.cwd()
         cfg.add(args.name, root, force=args.force)
@@ -43,7 +44,7 @@ def cmd_fleets_add(args: argparse.Namespace) -> int:
 
 
 def cmd_fleets_default(args: argparse.Namespace) -> int:
-    with _config_lock(config_path()):
+    with config_lock(config_path()):
         cfg = FleetsConfig.load()
         cfg.set_default(args.name)
         cfg.save()
@@ -52,7 +53,7 @@ def cmd_fleets_default(args: argparse.Namespace) -> int:
 
 
 def cmd_fleets_remove(args: argparse.Namespace) -> int:
-    with _config_lock(config_path()):
+    with config_lock(config_path()):
         cfg = FleetsConfig.load()
         was_default = cfg.remove(args.name)
         cfg.save()
@@ -70,7 +71,7 @@ def cmd_fleets_remove(args: argparse.Namespace) -> int:
 
 
 def cmd_fleets_rename(args: argparse.Namespace) -> int:
-    with _config_lock(config_path()):
+    with config_lock(config_path()):
         cfg = FleetsConfig.load()
         cfg.rename(args.old, args.new)
         cfg.save()

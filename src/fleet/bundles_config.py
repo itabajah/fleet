@@ -1,9 +1,9 @@
 """Per-fleet repo bundles: named, ordered aliases for ``--repos`` lists.
 
 Stored at ``<fleet-root>/bundles.json`` (sibling of ``fleet.json``).
-Mirrors the :mod:`fleet.fleets_config` patterns: dataclass + atomic
-tmp+``os.replace`` writes + reuse of :func:`_config_lock` for
-cross-process serialisation.
+Mirrors the :mod:`fleet.fleets_config` patterns: dataclass +
+:func:`fleet.jsonstore.write_json_atomic` writes + reuse of
+:func:`fleet.jsonstore.config_lock` for cross-process serialisation.
 
 A bundle is a flat, ordered list of repo tokens — exactly what
 :func:`fleet.tasks.validation.resolve_repo` accepts. Bundles cannot
@@ -13,13 +13,11 @@ write time, which makes circular references structurally impossible.
 
 from __future__ import annotations
 
-import contextlib
-import json
-import os
 import re
 from dataclasses import dataclass, field
 
 from fleet.errors import FleetError
+from fleet.jsonstore import read_json, write_json_atomic
 from fleet.state import bundles_path
 
 # Same shape as task / fleet names: alphanum start, then alphanum + ``.``
@@ -61,10 +59,7 @@ class BundlesConfig:
         path = bundles_path()
         if not path.is_file():
             return cls()
-        try:
-            data = json.loads(path.read_text(encoding="utf-8-sig"))
-        except json.JSONDecodeError as e:
-            raise FleetError(f"Malformed bundles config at {path}: {e}") from e
+        data = read_json(path, what=f"bundles config at {path}")
         if not isinstance(data, dict):
             raise FleetError(
                 f"Malformed bundles config at {path}: top-level value is "
@@ -115,21 +110,13 @@ class BundlesConfig:
 
     def save(self) -> None:
         path = bundles_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "bundles": {
                 name: list(self.bundles[name])
                 for name in sorted(self.bundles)
             }
         }
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-        try:
-            os.replace(tmp, path)
-        except OSError:
-            with contextlib.suppress(OSError):
-                tmp.unlink()
-            raise
+        write_json_atomic(path, payload)
 
     # ------------------------------ accessors --------------------------------
 
