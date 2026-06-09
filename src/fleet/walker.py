@@ -62,30 +62,32 @@ def walk_repos(root: Path) -> Iterator[Path]:
     while stack:
         cur, inside_repo = stack.pop()
         try:
-            with os.scandir(cur) as it:
-                entries = list(it)
+            scan = os.scandir(cur)
         except OSError:
             continue
 
-        for entry in entries:
-            try:
-                if not entry.is_dir(follow_symlinks=False):
+        # Iterate the OS handle lazily (no list() materialization) so a
+        # directory with tens of thousands of entries doesn't spike memory.
+        with scan:
+            for entry in scan:
+                try:
+                    if not entry.is_dir(follow_symlinks=False):
+                        continue
+                except OSError:
                     continue
-            except OSError:
-                continue
-            if entry.name in _PRUNE_DIRS:
-                continue
-            if inside_repo and entry.name in _IN_REPO_PRUNE_DIRS:
-                continue
-            p = Path(entry.path)
-            try:
-                real = p.resolve()
-            except OSError:
-                continue
-            if real in seen:
-                continue
-            seen.add(real)
-            is_repo = looks_like_git_repo(p)
-            if is_repo:
-                yield p
-            stack.append((p, inside_repo or is_repo))
+                if entry.name in _PRUNE_DIRS:
+                    continue
+                if inside_repo and entry.name in _IN_REPO_PRUNE_DIRS:
+                    continue
+                p = Path(entry.path)
+                try:
+                    real = p.resolve()
+                except OSError:
+                    continue
+                if real in seen:
+                    continue
+                seen.add(real)
+                is_repo = looks_like_git_repo(p)
+                if is_repo:
+                    yield p
+                stack.append((p, inside_repo or is_repo))

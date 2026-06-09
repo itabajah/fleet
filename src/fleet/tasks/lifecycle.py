@@ -6,6 +6,7 @@ import argparse
 import contextlib
 import shutil
 import sys
+import uuid
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,9 +22,8 @@ from fleet.tasks.validation import resolve_repo, task_branch, validate_task_name
 from fleet.tasks.worktree import (
     add_worktree,
     assert_no_leaf_collision,
-    prepare_canonical,
+    prepare_canonicals_parallel,
 )
-
 
 # ---------------------------------------------------------------------------
 # task new
@@ -35,6 +35,8 @@ def cmd_new(args: argparse.Namespace) -> int:
 
     root = tasks_root()
     workspace = root / name
+    # Best-effort fast path for a friendly message; the authoritative guard
+    # is the exclusive mkdir below (closes the exists()→mkdir TOCTOU window).
     if workspace.exists():
         raise FleetError(
             f"Task '{name}' already exists at {workspace}. "
@@ -91,12 +93,24 @@ def cmd_new(args: argparse.Namespace) -> int:
     branch = task_branch(name)
     description = args.description
 
-    workspace.mkdir(parents=True, exist_ok=False)
+    try:
+        workspace.mkdir(parents=True, exist_ok=False)
+    except FileExistsError:
+        # Lost the race against a concurrent `task new` (or a stray dir
+        # appeared after the pre-check). Same user-facing message.
+        raise FleetError(
+            f"Task '{name}' already exists at {workspace}. "
+            f"Pick a different name or `fleet task end {name}` first."
+        ) from None
 
     created_worktrees: list[tuple[RepoInfo, Path, str]] = []
     try:
+        # Prepare every canonical concurrently (network fetch/pull is the
+        # slow part), then create worktrees serially in selection order so
+        # output and rollback stay deterministic.
+        branch_by_repo = prepare_canonicals_parallel(chosen, no_pull=args.no_pull)
         for repo in chosen:
-            default = prepare_canonical(repo, no_pull=args.no_pull)
+            default = branch_by_repo[id(repo)]
             wt, _branch_is_new = add_worktree(repo, name, default, workspace)
             created_worktrees.append((repo, wt, branch))
 
@@ -162,24 +176,19 @@ def _archive_workspace(workspace: Path, name: str) -> Path:
     """Zip up ``task.json`` + ``context.md`` + ``scratch/`` into the archive root.
 
     Uses a UTC timestamp so two ``task end`` runs in different time zones
-    don't collide subtly. The collision guard handles same-second retries
-    and is bounded so a pathological archive directory can't hang us.
+    don't collide subtly. A short random suffix disambiguates same-second
+    runs without any retry cap.
     """
     archive_dir = archive_root()
     archive_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     archive_path = archive_dir / f"{name}-{stamp}.zip"
     if archive_path.exists():
-        for i in range(2, 1002):
-            candidate = archive_dir / f"{name}-{stamp}-{i}.zip"
-            if not candidate.exists():
-                archive_path = candidate
-                break
-        else:
-            raise FleetError(
-                f"Refusing to archive: more than 1000 archives already exist "
-                f"with prefix {name}-{stamp} in {archive_dir}."
-            )
+        # Same-second collision (or a re-run): tack on a random suffix.
+        # uuid4 makes a clash astronomically unlikely, so no bounded retry
+        # loop is needed.
+        while archive_path.exists():
+            archive_path = archive_dir / f"{name}-{stamp}-{uuid.uuid4().hex[:8]}.zip"
 
     with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for top in ("task.json", "context.md"):
@@ -247,30 +256,49 @@ def cmd_end(args: argparse.Namespace) -> int:
     print(f"Archived metadata -> {archive_path}")
 
     failures: list[str] = []
+    touched_canonicals: set[Path] = set()
     for r in live_worktrees:
         flag = ["--force"] if args.force else []
         proc = git_ops.run_git("worktree", "remove", *flag,
                                str(r.worktree_path),
                                cwd=r.canonical_path, check=False)
+        touched_canonicals.add(r.canonical_path)
         if not proc.ok:
             failures.append(f"  {r.name}: {proc.stderr.strip()}")
         else:
             print(f"  removed worktree {r.name}")
 
-    for r in manifest.repos:
-        if r.canonical_path.is_dir():
-            git_ops.run_git("worktree", "prune", cwd=r.canonical_path, check=False)
+    # Prune only the canonicals we actually removed a worktree from, rather
+    # than every repo in the manifest (cheaper, and avoids touching repos
+    # whose worktree was already gone).
+    for cpath in touched_canonicals:
+        if cpath.is_dir():
+            git_ops.run_git("worktree", "prune", cwd=cpath, check=False)
 
     if failures:
-        # Worktree teardown failed. The archive is still useful; tell the
-        # user it's there so a retry can short-circuit re-archiving.
-        print("\nWARN: some worktrees could not be removed:", file=sys.stderr)
+        # Teardown hit an unexpected error (the dirty/unpushed gate ran
+        # earlier, so this isn't user data we promised to preserve). Finish
+        # the job best-effort so the task isn't left half-dead: drop the
+        # workspace, then re-prune so no orphan `.git/worktrees/<leaf>`
+        # admin entries linger.
+        print("\nWARN: some worktrees could not be removed cleanly:",
+              file=sys.stderr)
         for line in failures:
             print(line, file=sys.stderr)
-        print(f"\nFix those manually, then delete the workspace folder:\n"
-              f"  {workspace}\n"
-              f"(metadata already archived to {archive_path}; safe to "
-              f"discard the workspace once the worktrees are gone.)",
+        shutil.rmtree(workspace, ignore_errors=True)
+        for cpath in touched_canonicals:
+            if cpath.is_dir():
+                git_ops.run_git("worktree", "prune", cwd=cpath, check=False)
+        still_there = workspace.exists()
+        if still_there:
+            print(f"\nThe workspace folder could not be fully removed:\n"
+                  f"  {workspace}\n"
+                  f"Close anything holding it open and delete it manually.",
+                  file=sys.stderr)
+        else:
+            print(f"\nWorkspace removed despite the errors above; metadata is "
+                  f"archived at {archive_path}.", file=sys.stderr)
+        print(f"\nBranch '{branch}' still exists in each canonical (recoverable).",
               file=sys.stderr)
         return 2
 

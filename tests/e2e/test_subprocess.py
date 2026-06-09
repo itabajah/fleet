@@ -187,3 +187,81 @@ def test_bundles_crud_end_to_end(sandbox, tmp_path) -> None:
     ) == 1
 
     assert _run("fleets", "remove", "bsmoke").returncode == 0
+
+
+def test_fleets_rename_end_to_end(sandbox, tmp_path) -> None:
+    repos_root = tmp_path / "ren"
+    repos_root.mkdir()
+    assert _run("fleets", "add", "old",
+                "--root", str(repos_root)).returncode == 0
+    r = _run("fleets", "rename", "old", "fresh")
+    assert r.returncode == 0, r.stderr
+    listed = _run("fleets", "list")
+    assert "fresh" in listed.stdout
+    assert "old" not in listed.stdout.replace("fresh", "")
+    assert _run("fleets", "remove", "fresh").returncode == 0
+
+
+def test_bundles_rename_end_to_end(sandbox, tmp_path) -> None:
+    repos_root = tmp_path / "bren"
+    repos_root.mkdir()
+    for name in ("alpha", "beta"):
+        d = repos_root / name
+        d.mkdir()
+        (d / ".git").write_text("gitdir: ./fake\n", encoding="utf-8")
+    assert _run("fleets", "add", "brn", "--root", str(repos_root)).returncode == 0
+    assert _run("scan", "-F", "brn").returncode == 0
+    assert _run("bundles", "add", "core", "--repos", "alpha,beta",
+                "-F", "brn").returncode == 0
+    r = _run("bundles", "rename", "core", "renamed", "-F", "brn")
+    assert r.returncode == 0, r.stderr
+    listed = _run("bundles", "list", "-F", "brn")
+    assert "renamed" in listed.stdout
+    assert _run("fleets", "remove", "brn").returncode == 0
+
+
+def test_repos_json_and_filter(sandbox, tmp_path) -> None:
+    repos_root = tmp_path / "rj"
+    repos_root.mkdir()
+    for name in ("alpha-cli", "beta"):
+        d = repos_root / name
+        d.mkdir()
+        (d / ".git").write_text("gitdir: ./fake\n", encoding="utf-8")
+    assert _run("fleets", "add", "rj", "--root", str(repos_root)).returncode == 0
+    assert _run("scan", "-F", "rj").returncode == 0
+
+    r_json = _run("repos", "--json", "-F", "rj")
+    assert r_json.returncode == 0
+    import json as _json
+    lines = [ln for ln in r_json.stdout.splitlines() if ln.strip()]
+    names = {_json.loads(ln)["name"] for ln in lines}
+    assert names == {"alpha-cli", "beta"}
+
+    r_filter = _run("repos", "--filter", "*-cli", "-F", "rj")
+    assert r_filter.returncode == 0
+    assert "alpha-cli" in r_filter.stdout
+    assert "beta" not in r_filter.stdout
+    assert _run("fleets", "remove", "rj").returncode == 0
+
+
+def test_doctor_reports_problems(sandbox, tmp_path) -> None:
+    repos_root = tmp_path / "doc"
+    repos_root.mkdir()
+    assert _run("fleets", "add", "doc", "--root", str(repos_root)).returncode == 0
+    # Clean config (no fleet.json yet is a notice, not a problem) -> exit 0.
+    r_ok = _run("doctor")
+    assert r_ok.returncode == 0, r_ok.stderr
+    assert "doc" in r_ok.stdout
+
+    # Now break it: point a second fleet at a path, then delete the path.
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    assert _run("fleets", "add", "broken", "--root", str(gone)).returncode == 0
+    import shutil as _shutil
+    _shutil.rmtree(gone)
+    r_bad = _run("doctor")
+    assert r_bad.returncode == 2, r_bad.stdout
+    assert "does not exist" in r_bad.stdout
+    assert _run("fleets", "remove", "doc").returncode == 0
+    assert _run("fleets", "remove", "broken").returncode == 0
+

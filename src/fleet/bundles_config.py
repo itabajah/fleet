@@ -18,10 +18,8 @@ import json
 import os
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from fleet.errors import FleetError
-from fleet.fleets_config import _config_lock
 from fleet.state import bundles_path
 
 # Same shape as task / fleet names: alphanum start, then alphanum + ``.``
@@ -100,7 +98,19 @@ class BundlesConfig:
                         f"Malformed bundles config at {path}: bundle "
                         f"'{name}' contains nested reference '{m}'."
                     )
-            out[name] = list(members)
+                # Apply the same token validation as the write path so a
+                # hand-edited file with an illegal token fails fast at load
+                # with a clear message, not later mid-expansion.
+                try:
+                    _validate_member_token(m)
+                except FleetError as e:
+                    raise FleetError(
+                        f"Malformed bundles config at {path}: bundle "
+                        f"'{name}': {e}"
+                    ) from e
+            # Dedup while preserving order (a hand-edited file may repeat a
+            # token; add() already dedups, so match that invariant on read).
+            out[name] = list(dict.fromkeys(members))
         return cls(bundles=out)
 
     def save(self) -> None:
@@ -162,6 +172,23 @@ class BundlesConfig:
                 f"No such bundle: '{name}'. Known bundles: {known}."
             )
         del self.bundles[name]
+
+    def rename(self, old: str, new: str) -> None:
+        """Rename bundle ``old`` to ``new``, preserving its member order."""
+        if old not in self.bundles:
+            known = ", ".join(self.names()) or "(none)"
+            raise FleetError(
+                f"No such bundle: '{old}'. Known bundles: {known}."
+            )
+        if old == new:
+            return
+        validate_bundle_name(new)
+        if new in self.bundles:
+            raise FleetError(
+                f"Bundle '{new}' already exists. "
+                f"Pick a different name or remove it first."
+            )
+        self.bundles[new] = self.bundles.pop(old)
 
     def edit(self, name: str, add: list[str], remove: list[str]) -> list[str]:
         """Apply ``add`` / ``remove`` to bundle ``name``. Returns new members.

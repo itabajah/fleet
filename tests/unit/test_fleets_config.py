@@ -122,15 +122,31 @@ def test_remove_unknown_raises(tmp_path: Path) -> None:
         cfg.remove("ghost")
 
 
-def test_remove_default_falls_back_alphabetically(tmp_path: Path) -> None:
+def test_remove_default_clears_default(tmp_path: Path) -> None:
+    # Removing the active default deliberately clears it (rather than
+    # silently promoting another fleet) so the user re-chooses explicitly.
     other = tmp_path / "other"
     other.mkdir()
     cfg = FleetsConfig()
     cfg.add("zeta", tmp_path)
     cfg.add("alpha", other)
     assert cfg.default == "zeta"
-    cfg.remove("zeta")
-    assert cfg.default == "alpha"
+    was_default = cfg.remove("zeta")
+    assert was_default is True
+    assert cfg.default is None
+    assert set(cfg.fleets) == {"alpha"}
+
+
+def test_remove_non_default_keeps_default(tmp_path: Path) -> None:
+    other = tmp_path / "other"
+    other.mkdir()
+    cfg = FleetsConfig()
+    cfg.add("zeta", tmp_path)
+    cfg.add("alpha", other)
+    assert cfg.default == "zeta"
+    was_default = cfg.remove("alpha")
+    assert was_default is False
+    assert cfg.default == "zeta"
 
 
 def test_remove_last_clears_default(tmp_path: Path) -> None:
@@ -138,6 +154,55 @@ def test_remove_last_clears_default(tmp_path: Path) -> None:
     cfg.add("alpha", tmp_path)
     cfg.remove("alpha")
     assert cfg.default is None
+
+
+def test_rename_preserves_root_and_default(tmp_path: Path) -> None:
+    cfg = FleetsConfig()
+    cfg.add("alpha", tmp_path)
+    assert cfg.default == "alpha"
+    cfg.rename("alpha", "beta")
+    assert "alpha" not in cfg.fleets
+    assert cfg.fleets["beta"].root == tmp_path.resolve()
+    assert cfg.default == "beta"
+
+
+def test_rename_unknown_raises(tmp_path: Path) -> None:
+    cfg = FleetsConfig()
+    with pytest.raises(FleetError, match="No such fleet"):
+        cfg.rename("ghost", "beta")
+
+
+def test_rename_onto_existing_raises(tmp_path: Path) -> None:
+    other = tmp_path / "other"
+    other.mkdir()
+    cfg = FleetsConfig()
+    cfg.add("alpha", tmp_path)
+    cfg.add("beta", other)
+    with pytest.raises(FleetError, match="already exists"):
+        cfg.rename("alpha", "beta")
+
+
+def test_rename_validates_new_name(tmp_path: Path) -> None:
+    cfg = FleetsConfig()
+    cfg.add("alpha", tmp_path)
+    with pytest.raises(FleetError, match="Invalid fleet name"):
+        cfg.rename("alpha", "bad name")
+
+
+def test_load_resolves_relative_roots(tmp_path: Path,
+                                      monkeypatch: pytest.MonkeyPatch) -> None:
+    # A hand-edited relative root must resolve consistently regardless of cwd.
+    sub = tmp_path / "repos"
+    sub.mkdir()
+    cfg_file = tmp_path / "fleets.json"
+    cfg_file.write_text(
+        '{"default": "main", "fleets": {"main": {"root": "repos"}}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FLEET_CONFIG_PATH", str(cfg_file))
+    monkeypatch.chdir(tmp_path)
+    cfg = FleetsConfig.load()
+    assert cfg.fleets["main"].root == sub.resolve()
 
 
 def test_set_default_unknown(tmp_path: Path) -> None:

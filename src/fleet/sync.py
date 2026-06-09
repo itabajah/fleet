@@ -9,6 +9,7 @@ they don't re-shell-out to ``git remote get-url``.
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
 import threading
 import time
@@ -48,7 +49,7 @@ class _Line:
 class _Result:
     index: int
     name: str
-    status: str = "Unknown"  # Success | DryRun | Skipped | Failed | NotGitRepo
+    status: str = "Unknown"  # Success|DryRun|Skipped|Failed|NotGitRepo|AuthFailed
     message: str = ""
     output: list[_Line] = field(default_factory=list)
 
@@ -65,6 +66,56 @@ def _color_for(name: str):
 def _print_lines(lines: list[_Line]) -> None:
     for line in lines:
         print(_color_for(line.color)(line.text))
+
+
+class _Progress:
+    """Live ``Progress: k/N (f failed)`` counter, repainted in place.
+
+    Workers call :meth:`tick` as they finish. On a TTY the line is rewritten
+    with a carriage return so a long sync shows live movement; when stdout is
+    piped/captured the ``\\r`` animation is suppressed (it would otherwise
+    litter the captured text) and only the final count is emitted once. All
+    per-repo detail prints afterwards, so nothing competes with this line
+    while the pool runs.
+    """
+
+    def __init__(self, total: int, lock: threading.Lock) -> None:
+        self._total = total
+        self._lock = lock
+        self._done = 0
+        self._failed = 0
+        self._tty = bool(getattr(sys.stdout, "isatty", lambda: False)())
+
+    def render(self) -> None:
+        if not self._tty:
+            return
+        with self._lock:
+            self._write()
+
+    def tick(self, *, failed: bool) -> None:
+        with self._lock:
+            self._done += 1
+            if failed:
+                self._failed += 1
+            if self._tty:
+                self._write()
+
+    def finish(self) -> None:
+        """Emit a final newline (TTY) or a one-shot summary count (non-TTY)."""
+        with self._lock:
+            if self._tty:
+                sys.stdout.write("\n")
+            else:
+                tail = f"  ({self._failed} failed)" if self._failed else ""
+                sys.stdout.write(f"Progress: {self._done}/{self._total}{tail}\n")
+            sys.stdout.flush()
+
+    def _write(self) -> None:
+        tail = red(f"  ({self._failed} failed)") if self._failed else ""
+        sys.stdout.write(
+            f"\r{cyan('Progress:')} {self._done}/{self._total}{tail}   "
+        )
+        sys.stdout.flush()
 
 
 # ---------------------------------------------------------------------------
@@ -188,7 +239,7 @@ def _retry_call(label: str, fn, output: list[_Line]) -> git_ops.GitResult:
 
 
 def _process_repo(repo: RepoInfo, info: _HostInfo, index: int, dry_run: bool,
-                  progress_lock: threading.Lock) -> _Result:
+                  progress: _Progress) -> _Result:
     res = _Result(index=index, name=repo.name)
     out = res.output
 
@@ -268,14 +319,12 @@ def _process_repo(repo: RepoInfo, info: _HostInfo, index: int, dry_run: bool,
         out.append(_Line("  ✓ Successfully updated", "green"))
         res.status = "Success"
 
-    except Exception as e:  # noqa: BLE001 — surface unexpected errors per-repo
+    except (FleetError, OSError, subprocess.SubprocessError) as e:
         out.append(_Line(f"  ✗ Error: {e}", "red"))
         res.status = "Failed"
         res.message = str(e)
     finally:
-        with progress_lock:
-            sys.stdout.write(green("."))
-            sys.stdout.flush()
+        progress.tick(failed=res.status == "Failed")
 
     return res
 
@@ -309,7 +358,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                 f"capped at {_MAX_PARALLEL} to avoid network/host exhaustion."
             ))
     else:
-        workers = max(1, min(args.workers, _MAX_PARALLEL))
+        workers = max(1, min(args.workers, len(repos), _MAX_PARALLEL))
 
     auth_skipped: list[RepoInfo] = []
     if not args.no_auth_check:
@@ -343,32 +392,56 @@ def cmd_sync(args: argparse.Namespace) -> int:
     print(cyan(f"Processing {len(repos)} repositories with {workers} worker(s)"))
     print(cyan("====================================="))
     print()
-    sys.stdout.write(cyan("Progress: "))
-    sys.stdout.flush()
 
     progress_lock = threading.Lock()
+    progress = _Progress(len(repos), progress_lock)
+    progress.render()
     results: list[_Result] = []
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [
+    interrupted = False
+    pool = ThreadPoolExecutor(max_workers=workers)
+    try:
+        future_map = {
             pool.submit(_process_repo, r, host_info[id(r)], i,
-                        args.dry_run, progress_lock)
+                        args.dry_run, progress): r
             for i, r in enumerate(repos)
-        ]
-        for fut in as_completed(futures):
-            results.append(fut.result())
+        }
+        try:
+            for fut in as_completed(future_map):
+                results.append(fut.result())
+        except KeyboardInterrupt:
+            interrupted = True
+            sys.stdout.write(yellow(
+                "\n⚠ Interrupted — cancelling repos that haven't started; "
+                "in-flight git calls finish first (bounded by FLEET_GIT_TIMEOUT)...\n"
+            ))
+            sys.stdout.flush()
+    finally:
+        # cancel_futures drops queued work; wait=True drains in-flight workers.
+        pool.shutdown(wait=True, cancel_futures=True)
 
-    sys.stdout.write(green(" Done!\n"))
-    sys.stdout.flush()
+    # Collect results that completed before / during shutdown (idempotent on
+    # the normal path, where as_completed already appended every result).
+    collected = {id(res) for res in results}
+    for fut in future_map:
+        if fut.done() and not fut.cancelled():
+            try:
+                res = fut.result()
+            except BaseException:
+                continue
+            if id(res) not in collected:
+                results.append(res)
+                collected.add(id(res))
+
+    progress.finish()
     print()
-
-    # Synthesize Skipped results for any repos the auth probe culled, so
+    # Synthesize results for any repos the auth probe culled, so
     # they show up in per-repo output and in the summary counts.
     base_index = len(repos)
     for offset, r in enumerate(auth_skipped):
         skipped = _Result(
             index=base_index + offset,
             name=r.name,
-            status="Skipped",
+            status="AuthFailed",
             message="auth failed for host",
         )
         skipped.output.append(_Line(f"Processing: {r.display_name}", "yellow"))
@@ -386,7 +459,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
 
     counts = {
         "Success": 0, "DryRun": 0, "Skipped": 0,
-        "Failed": 0, "NotGitRepo": 0,
+        "Failed": 0, "NotGitRepo": 0, "AuthFailed": 0,
     }
     errors: list[str] = []
     for result in results:
@@ -403,6 +476,8 @@ def cmd_sync(args: argparse.Namespace) -> int:
         print(magenta(f"  Dry run (would pull): {counts['DryRun']}"))
     print(yellow(f"  Skipped:              {counts['Skipped']}"))
     print(red(f"  Failed:               {counts['Failed']}"))
+    if counts["AuthFailed"]:
+        print(red(f"  Auth failed (host):   {counts['AuthFailed']}"))
     if counts["NotGitRepo"]:
         print(gray(f"  Not a git repo:       {counts['NotGitRepo']}"))
     print()
@@ -412,10 +487,16 @@ def cmd_sync(args: argparse.Namespace) -> int:
             print(red(f"  - {e}"))
         print()
 
+    if interrupted:
+        print(yellow("⚠ Interrupted — partial results shown above."))
+        return 130
     if counts["Failed"] > 0:
         # Match the partial-failure exit code used by `fleet task sync`
         # (and FleetError's documented convention).
         print(yellow("⚠ Completed with errors"))
+        return 2
+    if counts["AuthFailed"] > 0:
+        print(yellow("⚠ Completed; repos on failed-auth hosts were skipped."))
         return 2
     if counts["Success"] == 0 and counts["DryRun"] == 0:
         print(yellow("⚠ No repositories were updated"))

@@ -70,7 +70,7 @@ class TestTaskGroup:
 class TestFleetsGroup:
     def test_fleets_subcommands(self) -> None:
         assert set(_candidates("fleets", "")) == {
-            "list", "add", "default", "remove",
+            "list", "add", "default", "remove", "rename",
         }
 
 
@@ -417,4 +417,60 @@ class TestBundlesCompletion:
         )
         assert directive == completion.DIRECTIVE_NOSPACE
         assert set(cands) == {"alpha", "beta"}
+
+
+class TestRender:
+    def test_sanitizes_newlines_in_candidates(
+        self, monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # A candidate containing a newline would corrupt the one-per-line
+        # wire protocol; render() must strip it.
+        monkeypatch.setattr(
+            completion, "complete",
+            lambda _w: (completion.DIRECTIVE_DEFAULT, ["good", "ba\nd", ""]),
+        )
+        completion.render(["task"])
+        lines = capsys.readouterr().out.splitlines()
+        assert lines[0] == f":{completion.DIRECTIVE_DEFAULT}"
+        # The empty candidate is dropped; the newline one is collapsed.
+        assert "good" in lines
+        assert "ba d" in lines
+        assert "" not in lines[1:]
+        assert all("\n" not in line for line in lines)
+
+    def test_render_never_raises_on_provider_error(
+        self, monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        def _boom(_w: object) -> tuple[int, list[str]]:
+            raise RuntimeError("provider exploded")
+
+        monkeypatch.setattr(completion, "complete", _boom)
+        # Must not raise, and must still emit a valid directive line.
+        completion.render(["task"])
+        out = capsys.readouterr().out
+        assert out.startswith(f":{completion.DIRECTIVE_DEFAULT}")
+
+    def test_render_times_out_slow_provider(
+        self, monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        import time
+
+        def _slow(_w: object) -> tuple[int, list[str]]:
+            time.sleep(5)
+            return completion.DIRECTIVE_DEFAULT, ["late"]
+
+        monkeypatch.setattr(completion, "complete", _slow)
+        monkeypatch.setattr(completion, "_COMPLETION_TIMEOUT_SECONDS", 0.1)
+        start = time.monotonic()
+        completion.render(["task"])
+        elapsed = time.monotonic() - start
+        # Should bail out near the timeout, not wait the full 5s.
+        assert elapsed < 2.0
+        out = capsys.readouterr().out
+        assert out.startswith(f":{completion.DIRECTIVE_DEFAULT}")
+        assert "late" not in out
+
 

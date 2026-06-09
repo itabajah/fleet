@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pytest
 
-from fleet.bundles_config import BundlesConfig
 from fleet.bundles_commands import (
     cmd_bundles_add,
     cmd_bundles_edit,
@@ -16,12 +15,12 @@ from fleet.bundles_commands import (
     cmd_bundles_remove,
     cmd_bundles_show,
 )
+from fleet.bundles_config import BundlesConfig
 from fleet.errors import FleetError
 from fleet.state import bundles_path, set_active_fleet, tasks_root
 from fleet.tasks.edit import cmd_add_repo, cmd_remove_repo
 from fleet.tasks.lifecycle import cmd_new
 from fleet.tasks.manifest import Manifest
-
 
 # ---------------------------------------------------------------------------
 # argparse.Namespace builders

@@ -13,6 +13,7 @@ from fleet.fleets_commands import (
     cmd_fleets_default,
     cmd_fleets_list,
     cmd_fleets_remove,
+    cmd_fleets_rename,
 )
 from fleet.fleets_config import FleetsConfig
 
@@ -87,15 +88,32 @@ def test_default_switches(tmp_path, capsys) -> None:
     assert cfg.default == "beta"
 
 
-def test_remove_falls_back_alphabetically(tmp_path, capsys) -> None:
+def test_remove_default_clears_and_warns(tmp_path, capsys) -> None:
+    # Removing the active default clears it (no silent alphabetical promote)
+    # and the handler prints a prominent warning naming the remaining fleets.
     other = tmp_path / "other"
     other.mkdir()
     cmd_fleets_add(_add_args("zeta", tmp_path))
     cmd_fleets_add(_add_args("alpha", other))
     capsys.readouterr()
     cmd_fleets_remove(argparse.Namespace(name="zeta"))
+    out = capsys.readouterr().out
+    assert "was the default" in out
+    assert "alpha" in out
     cfg = FleetsConfig.load()
-    assert cfg.default == "alpha"
+    assert cfg.default is None
+    assert set(cfg.fleets) == {"alpha"}
+
+
+def test_fleets_rename_cli(tmp_path, capsys) -> None:
+    cmd_fleets_add(_add_args("old", tmp_path))
+    capsys.readouterr()
+    rc = cmd_fleets_rename(argparse.Namespace(old="old", new="fresh"))
+    assert rc == 0
+    cfg = FleetsConfig.load()
+    assert "old" not in cfg.fleets
+    assert cfg.fleets["fresh"].root == tmp_path.resolve()
+    assert cfg.default == "fresh"
 
 
 def test_remove_last_clears_default(tmp_path, capsys) -> None:

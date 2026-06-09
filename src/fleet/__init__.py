@@ -4,4 +4,4 @@ Parallel git sync runner, registry scanner, and task-worktree scaffolder.
 See `python -m fleet --help`.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

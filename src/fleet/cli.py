@@ -23,19 +23,30 @@ import contextlib
 import sys
 from pathlib import Path
 
-from fleet import __version__, bundles_commands, completion, fleets_commands, repos_command, scan, sync, tasks
-from fleet.console import dim, red
-from fleet.errors import FleetError
+from fleet import (
+    __version__,
+    bundles_commands,
+    completion,
+    doctor,
+    fleets_commands,
+    repos_command,
+    scan,
+    sync,
+    tasks,
+)
+from fleet.console import dim, eprint
+from fleet.errors import EXIT_INTERRUPT, EXIT_OK, FleetError
 from fleet.fleets_config import FleetsConfig
 from fleet.state import active_fleet_name, set_active_fleet
 
 
 def _open_unsupported(_args: argparse.Namespace) -> int:
     """Stub for ``fleet open`` / ``fleet task open``: Python can't cd the parent."""
-    print(red(
+    eprint(
         "ERROR: `fleet open` mutates the parent shell's working directory, "
-        "so it can't run from the Python CLI."
-    ), file=sys.stderr)
+        "so it can't run from the Python CLI directly — it lives in the shell "
+        "wrapper.", color="31",
+    )
     if sys.platform == "win32":
         # Best-effort hint when running from a source checkout. When installed
         # via pip into site-packages, the path is misleading, so we omit it.
@@ -61,7 +72,8 @@ def _open_unsupported(_args: argparse.Namespace) -> int:
             )
     else:
         print(
-            "From bash/zsh, run:\n"
+            "Source fleet.sh from your ~/.bashrc / ~/.zshrc to get "
+            "`fleet open`, or run directly:\n"
             "  cd \"$(fleet task path <name>)\" && code .",
             file=sys.stderr,
         )
@@ -93,13 +105,15 @@ def build_parser() -> argparse.ArgumentParser:
     task_sub = tasks.register(subparsers, fleet_arg)
     fleets_commands.register(subparsers, fleet_arg)
     bundles_commands.register(subparsers, fleet_arg)
+    doctor.register(subparsers, fleet_arg)
 
-    # `fleet open` and `fleet task open` are PS-only. Stub them here so the
-    # error message is a single concise line rather than argparse's
-    # "invalid choice" complaint.
+    # `fleet open` and `fleet task open` are implemented in the shell wrapper
+    # (Fleet.psm1 / fleet.sh) because Python can't cd the parent shell. Stub
+    # them here so a direct-CLI invocation gives a single concise hint rather
+    # than argparse's "invalid choice" complaint.
     s_open = subparsers.add_parser(
         "open",
-        help="(PowerShell-only) cd into a task workspace and launch VS Code",
+        help="cd into a task workspace and launch VS Code (needs shell wrapper)",
     )
     s_open.add_argument("name", nargs="?", help="task name")
     s_open.set_defaults(func=_open_unsupported)
@@ -108,7 +122,7 @@ def build_parser() -> argparse.ArgumentParser:
     # tasks.register so we don't need to reach into argparse internals.
     s_topen = task_sub.add_parser(
         "open",
-        help="(PowerShell-only) cd into a task workspace and launch VS Code",
+        help="cd into a task workspace and launch VS Code (needs shell wrapper)",
     )
     s_topen.add_argument("name", nargs="?", help="task name")
     s_topen.set_defaults(func=_open_unsupported)
@@ -137,8 +151,10 @@ def _needs_active_fleet(args: argparse.Namespace) -> bool:
 
     ``fleet fleets ...`` and ``fleet open`` (and ``fleet task open``) are
     excluded: they manage config or shell state and don't read the registry.
+    ``fleet doctor`` is excluded too — it resolves fleets itself so it can
+    diagnose a config with no default (or no fleets at all).
     """
-    if args.cmd in ("fleets", "open", "completion"):
+    if args.cmd in ("fleets", "open", "completion", "doctor"):
         return False
     return not (args.cmd == "task" and getattr(args, "task_cmd", None) == "open")
 
@@ -153,7 +169,7 @@ def main(argv: list[str] | None = None) -> int:
         if reconfigure is None:
             continue
         encoding = (getattr(stream, "encoding", "") or "").lower()
-        if encoding.replace("-", "") == "utf8":
+        if encoding.replace("-", "").replace("_", "") == "utf8":
             continue
         with contextlib.suppress(OSError):
             reconfigure(encoding="utf-8", errors="replace")
@@ -167,7 +183,7 @@ def main(argv: list[str] | None = None) -> int:
         if words and words[0] == "--":
             words = words[1:]
         completion.render(words)
-        return 0
+        return EXIT_OK
 
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -178,7 +194,7 @@ def main(argv: list[str] | None = None) -> int:
             entry = cfg.resolve(getattr(args, "fleet", None))
             set_active_fleet(entry.name, entry.root)
         except FleetError as e:
-            print(f"{red('ERROR:')} {e}", file=sys.stderr)
+            eprint(f"ERROR: {e}", color="31")
             return e.exit_code
 
         # Show a quiet banner only when overriding via -F so default usage
@@ -192,11 +208,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return args.func(args)
     except FleetError as e:
-        print(f"{red('ERROR:')} {e}", file=sys.stderr)
+        eprint(f"ERROR: {e}", color="31")
         return e.exit_code
     except KeyboardInterrupt:
-        print(red("\nInterrupted."), file=sys.stderr)
-        return 130
+        eprint("\nInterrupted.", color="31")
+        return EXIT_INTERRUPT
 
 
 if __name__ == "__main__":

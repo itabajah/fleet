@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from fleet.errors import FleetError
-from fleet.tasks.manifest import Manifest, RepoEntry, now_iso
+from fleet.tasks.manifest import MANIFEST_VERSION, Manifest, RepoEntry, now_iso, task_lock
 
 
 def _good_manifest_dict(workspace: Path) -> dict:
@@ -173,6 +173,56 @@ def test_load_rejects_invalid_branch(tmp_path: Path) -> None:
     (tmp_path / "task.json").write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(FleetError, match="ref-format"):
         Manifest.load(tmp_path)
+
+
+def test_save_writes_schema_version(tmp_path: Path) -> None:
+    m = Manifest(name="t", branch="b", created_at="x", description="",
+                 repos=[])
+    m.save(tmp_path)
+    data = json.loads((tmp_path / "task.json").read_text(encoding="utf-8"))
+    assert data["version"] == MANIFEST_VERSION
+
+
+def test_load_tolerates_missing_version(tmp_path: Path) -> None:
+    # Pre-versioning manifests omit the field; they read as the current version.
+    payload = _good_manifest_dict(tmp_path)
+    assert "version" not in payload
+    (tmp_path / "task.json").write_text(json.dumps(payload), encoding="utf-8")
+    m = Manifest.load(tmp_path)
+    assert m.version == MANIFEST_VERSION
+
+
+def test_load_rejects_future_version(tmp_path: Path) -> None:
+    payload = _good_manifest_dict(tmp_path)
+    payload["version"] = MANIFEST_VERSION + 1
+    (tmp_path / "task.json").write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(FleetError, match="schema version"):
+        Manifest.load(tmp_path)
+
+
+def test_task_lock_is_reentrant_across_sequential_acquire(tmp_path: Path) -> None:
+    # Sequential acquire/release works; the sidecar is cleaned up each time.
+    with task_lock(tmp_path):
+        assert (tmp_path / ".task.lock").exists()
+    assert not (tmp_path / ".task.lock").exists()
+    # Re-acquire after release succeeds.
+    with task_lock(tmp_path):
+        assert (tmp_path / ".task.lock").exists()
+
+
+def test_task_lock_blocks_second_holder(tmp_path: Path) -> None:
+    import fleet.tasks.manifest as man
+
+    # Shorten the timeout so the contended acquire fails fast.
+    original = man._LOCK_TIMEOUT_SECONDS
+    man._LOCK_TIMEOUT_SECONDS = 0.2
+    try:
+        with task_lock(tmp_path):  # noqa: SIM117 — nesting is the contention test
+            with pytest.raises(FleetError, match="Could not lock task"):
+                with task_lock(tmp_path):
+                    pass
+    finally:
+        man._LOCK_TIMEOUT_SECONDS = original
 
 
 def test_load_rejects_relative_canonical_path(tmp_path: Path) -> None:

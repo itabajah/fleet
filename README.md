@@ -21,16 +21,20 @@ dependencies** — Python stdlib + `git` is the entire stack.
 ## Highlights
 
 - **Parallel `git pull --ff-only`** across every enabled repo, with
-  per-host credential probing, retries, and a clean summary.
+  per-host credential probing, retries, per-call timeouts, graceful Ctrl-C,
+  and a clean summary.
 - **Disk-driven config**: `fleet scan` walks the tree and writes
   `fleet.json`. Manual `sync: false` and `exclude` entries survive
   re-scans; single-child folder chains collapse for compact output.
 - **Task workspaces**: `fleet task new bug-123 --repos foo,bar` creates
   one `git worktree` per repo on a shared `task/<fleet>/bug-123` branch,
-  with a manifest, scratch dir, and one-shot teardown.
+  with a manifest, scratch dir, and one-shot teardown. Canonicals are
+  fetched/pulled in parallel, so creating a many-repo task is fast.
 - **Multiple fleets**: register any number of named fleets (each is a
   root directory + its own `fleet.json`), with a default and per-command
   `-F NAME` override.
+- **`fleet doctor`**: one read-only command to validate every fleet root,
+  registry, bundle, and task workspace before things break mid-command.
 - **PowerShell-first**, but the Python CLI is fully usable on its own
   (Linux, macOS, WSL, Git Bash, etc.).
 
@@ -105,10 +109,13 @@ That's the entire happy path.
 | -------------------------------------------- | ------------------------------------------------------------------------ |
 | `fleet sync`                                 | Parallel `git pull --ff-only` across every enabled repo                   |
 | `fleet sync --dry-run`                       | Preview what sync would do                                                |
-| `fleet sync --workers N`                     | Worker count (default 10, `0` = auto: one per repo, capped at 32)        |
+| `fleet sync --workers N`                     | Worker count (default 10, auto-capped to repo count; `0` = one per repo, capped at 32) |
 | `fleet sync --no-auth-check`                 | Skip the per-host credential probe                                        |
 | `fleet scan`                                 | Walk disk, rewrite `fleet.json`, preserve manual settings                 |
 | `fleet repos`                                | List every git repo on disk; mark disabled / not-in-registry              |
+| `fleet repos --filter GLOB`                  | Only show repos whose name or `group/path/name` matches the glob          |
+| `fleet repos --json`                         | Emit one JSON object per repo on stdout                                    |
+| `fleet doctor`                               | Health-check fleets, registries, bundles, and tasks (exit 2 on problems)  |
 | `fleet task new <name> --repos a,b[,grp/c]`  | Create a task workspace with worktrees                                    |
 | `fleet task new ... --no-pull`               | Skip fetch + pull on each canonical repo (offline-safe; local refs only)  |
 | `fleet task new ... --dry-run`               | Validate inputs and print the plan without creating anything              |
@@ -126,11 +133,13 @@ That's the entire happy path.
 | `fleet fleets list`                          | Show every configured fleet, mark default                                 |
 | `fleet fleets add <name> [--root PATH] [--force]` | Register a fleet (defaults to current directory; `--force` overwrites)    |
 | `fleet fleets default <name>`                | Switch the default fleet                                                  |
+| `fleet fleets rename <old> <new>`            | Rename a fleet (config only; existing task branches keep the old name)    |
 | `fleet fleets remove <name>`                 | Unregister a fleet (no file deletion)                                     |
 | `fleet bundles add <name> --repos a,b[,grp/c] [--force]` | Save a named, ordered repo list (per-fleet)                |
 | `fleet bundles list`                         | List every bundle in the active fleet                                     |
 | `fleet bundles show <name>`                  | Print a bundle's members, marking any that no longer resolve              |
 | `fleet bundles edit <name> [--add a,b] [--remove c]` | Append and/or drop tokens in an existing bundle                   |
+| `fleet bundles rename <old> <new>`           | Rename a bundle (config only)                                             |
 | `fleet bundles remove <name>`                | Delete a bundle (config only — no git/worktree changes)                   |
 
 **Per-command override.** Add `-F NAME` (or `--fleet NAME`) to any
@@ -233,6 +242,20 @@ Tasks can also be edited in place without ending and recreating them:
   `--description-file PATH`, `-` for stdin) updates the manifest's
   description and the `## Description` section of `context.md`.
 
+Concurrent `fleet task` commands on the *same* task serialize via a
+per-workspace lock (`.task.lock`), so a racing `add-repo` and `edit`
+can't clobber each other's `task.json` write.
+
+### Environment variables
+
+| Variable             | Effect                                                                 |
+| -------------------- | ---------------------------------------------------------------------- |
+| `FLEET_CONFIG_PATH`  | Path to the named-fleets `fleets.json` (default LOCALAPPDATA / XDG)     |
+| `FLEET_TASKS_ROOT`   | Where task workspaces live (default `%LOCALAPPDATA%\fleet-tasks` / `~/fleet-tasks`) |
+| `FLEET_REPOS_ROOT`   | Escape-hatch repos root when no fleet is active (tests/scripts)         |
+| `FLEET_GIT_TIMEOUT`  | Per-call timeout (seconds) for network git ops (fetch/pull/ls-remote; default 120) |
+| `NO_COLOR` / `FORCE_COLOR` | Force-disable / force-enable ANSI color (overrides TTY detection) |
+
 ### Bundles
 
 A *bundle* is a named, ordered list of repo tokens (anything
@@ -318,7 +341,8 @@ fleet/
     ├── cli.py                 # argparse top-level + dispatch
     ├── console.py             # ANSI color helpers
     ├── discovery.py           # walks disk + applies fleet.json rules
-    ├── errors.py              # FleetError (carries exit code)
+    ├── doctor.py              # `fleet doctor` (config/registry/bundle/task health)
+    ├── errors.py              # FleetError (carries exit code) + exit-code constants
     ├── fleets_commands.py     # `fleet fleets ...` handlers
     ├── fleets_config.py       # named-fleet registry (LOCALAPPDATA / XDG)
     ├── git_ops.py             # unified git wrappers (run_git, fetch, pull, ...)

@@ -102,6 +102,41 @@ class TestBundlesConfig:
         with pytest.raises(FleetError, match="No such bundle"):
             cfg.remove("b")
 
+    def test_rename(self, active_fleet: Path) -> None:
+        cfg = BundlesConfig.load()
+        cfg.add("b", ["a", "c"], force=False)
+        cfg.rename("b", "renamed")
+        assert cfg.names() == ["renamed"]
+        assert cfg.get("renamed") == ["a", "c"]
+
+    def test_rename_unknown(self, active_fleet: Path) -> None:
+        cfg = BundlesConfig.load()
+        with pytest.raises(FleetError, match="No such bundle"):
+            cfg.rename("ghost", "x")
+
+    def test_rename_onto_existing(self, active_fleet: Path) -> None:
+        cfg = BundlesConfig.load()
+        cfg.add("a", ["x"], force=False)
+        cfg.add("b", ["y"], force=False)
+        with pytest.raises(FleetError, match="already exists"):
+            cfg.rename("a", "b")
+
+    def test_load_dedups_hand_edited_members(self, active_fleet: Path) -> None:
+        # A hand-edited file may repeat a token; load() matches add()'s dedup.
+        bundles_path().write_text(
+            '{"bundles": {"core": ["a", "a", "b"]}}', encoding="utf-8",
+        )
+        cfg = BundlesConfig.load()
+        assert cfg.get("core") == ["a", "b"]
+
+    def test_load_rejects_empty_member_token(self, active_fleet: Path) -> None:
+        bundles_path().write_text(
+            '{"bundles": {"core": ["a", ""]}}', encoding="utf-8",
+        )
+        with pytest.raises(FleetError, match="empty"):
+            BundlesConfig.load()
+
+
     def test_get_unknown(self, active_fleet: Path) -> None:
         cfg = BundlesConfig.load()
         with pytest.raises(FleetError, match="No such bundle"):

@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import difflib
 import re
+from typing import TYPE_CHECKING
 
 from fleet.discovery import RepoInfo
 from fleet.errors import FleetError
 from fleet.state import require_active_fleet
+
+if TYPE_CHECKING:
+    from fleet.tasks.manifest import Manifest, RepoEntry
 
 # Filesystem-safe AND valid as a git branch suffix. The regex enforces the
 # character set; ``validate_task_name`` additionally rules out the
@@ -17,6 +21,16 @@ _TASK_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-]{0,63}$")
 
 # Characters git itself forbids inside any ref segment (see git-check-ref-format).
 _BAD_BRANCH_CHARS = re.compile(r"[\s~^:?*\[\\\x00-\x1f\x7f]")
+
+# Names Windows reserves for legacy DOS devices: a directory or branch leaf
+# matching one (case-insensitively, with or without an extension) can't be
+# created on Windows and confuses tooling on every OS. Rejected on all
+# platforms so a task created on Linux can still be opened on Windows.
+_WINDOWS_RESERVED = frozenset({
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+})
 
 
 def validate_task_name(name: str) -> None:
@@ -34,6 +48,22 @@ def validate_task_name(name: str) -> None:
             f"Invalid task name '{name}'. Git would refuse the resulting "
             "branch (no '..', no leading/trailing '.', no '.lock' suffix, "
             "no '@{')."
+        )
+    # A trailing space is silently stripped by Windows when creating a
+    # directory, which would desync the workspace name from the branch
+    # suffix. The regex already blocks spaces, but guard explicitly in case
+    # the character set is ever widened.
+    if name != name.strip():
+        raise FleetError(
+            f"Invalid task name '{name}': leading/trailing whitespace."
+        )
+    # Reject reserved device names, with or without an extension
+    # (``CON``, ``con.txt``, ``LPT1`` ...).
+    stem = name.split(".", 1)[0].upper()
+    if stem in _WINDOWS_RESERVED:
+        raise FleetError(
+            f"Invalid task name '{name}': '{stem}' is a reserved device name "
+            "on Windows. Pick a different name."
         )
 
 
@@ -116,7 +146,7 @@ def resolve_repo(token: str, all_repos: list[RepoInfo]) -> RepoInfo:
             disambig = ", ".join(m.display_name for m in matches)
             raise FleetError(
                 f"Ambiguous repo name '{token}' — exists in multiple groups. "
-                f"Disambiguate with one of: {disambig}"
+                f"Use the full path, one of: {disambig}"
             )
         chosen = matches[0]
 
@@ -129,7 +159,7 @@ def resolve_repo(token: str, all_repos: list[RepoInfo]) -> RepoInfo:
     return chosen
 
 
-def require_repo_in_task(token: str, manifest) -> "object":  # noqa: ANN001
+def require_repo_in_task(token: str, manifest: Manifest) -> RepoEntry:
     """Resolve a ``--repos`` token to an entry of ``manifest.repos``.
 
     Accepts a bare leaf name or ``group/path/name``. Raises
@@ -137,7 +167,7 @@ def require_repo_in_task(token: str, manifest) -> "object":  # noqa: ANN001
     """
     norm = token.replace("\\", "/").strip("/")
     by_disp = {r.display_name: r for r in manifest.repos}
-    by_name: dict[str, list] = {}
+    by_name: dict[str, list[RepoEntry]] = {}
     for r in manifest.repos:
         by_name.setdefault(r.name, []).append(r)
 
@@ -151,7 +181,7 @@ def require_repo_in_task(token: str, manifest) -> "object":  # noqa: ANN001
             disambig = ", ".join(c.display_name for c in cands)
             raise FleetError(
                 f"Ambiguous repo '{token}' in task '{manifest.name}' — "
-                f"matches: {disambig}"
+                f"matches: {disambig}. Use the full 'group/path/name' form."
             )
     members = ", ".join(sorted(by_disp)) or "(none)"
     raise FleetError(

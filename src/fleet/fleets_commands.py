@@ -54,15 +54,33 @@ def cmd_fleets_default(args: argparse.Namespace) -> int:
 def cmd_fleets_remove(args: argparse.Namespace) -> int:
     with _config_lock(config_path()):
         cfg = FleetsConfig.load()
-        cfg.remove(args.name)
+        was_default = cfg.remove(args.name)
         cfg.save()
     print(green(f"✓ Unregistered fleet '{args.name}'"))
-    if cfg.default:
-        print(gray(f"  Default is now '{cfg.default}'."))
-    elif cfg.fleets:
-        print(gray("  No default set. Run `fleet fleets default <name>`."))
-    else:
-        print(gray("  No fleets remain. Add one with `fleet fleets add`."))
+    if was_default:
+        if cfg.fleets:
+            print(yellow(
+                f"  '{args.name}' was the default; no default is set now. "
+                f"Run `fleet fleets default <name>` to choose one "
+                f"({', '.join(sorted(cfg.fleets))})."
+            ))
+        else:
+            print(gray("  No fleets remain. Add one with `fleet fleets add`."))
+    return 0
+
+
+def cmd_fleets_rename(args: argparse.Namespace) -> int:
+    with _config_lock(config_path()):
+        cfg = FleetsConfig.load()
+        cfg.rename(args.old, args.new)
+        cfg.save()
+    print(green(f"✓ Renamed fleet '{args.old}' → '{args.new}'"))
+    if cfg.default == args.new:
+        print(gray("  (still the default)"))
+    print(yellow(
+        f"  Note: existing task branches keep the old name "
+        f"(`task/{args.old}/...`). New tasks use `task/{args.new}/...`."
+    ))
     return 0
 
 
@@ -94,3 +112,8 @@ def register(subparsers: argparse._SubParsersAction,
     f_rm = sub.add_parser("remove", help="unregister a fleet (no file deletion)")
     f_rm.add_argument("name", help="fleet name")
     f_rm.set_defaults(func=cmd_fleets_remove)
+
+    f_ren = sub.add_parser("rename", help="rename a fleet (config only)")
+    f_ren.add_argument("old", help="current fleet name")
+    f_ren.add_argument("new", help="new fleet name")
+    f_ren.set_defaults(func=cmd_fleets_rename)

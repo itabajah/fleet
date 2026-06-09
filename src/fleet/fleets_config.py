@@ -135,8 +135,13 @@ class FleetsConfig:
                 for name, entry in raw.items():
                     if (isinstance(entry, dict)
                             and isinstance(entry.get("root"), str)):
-                        fleets[name] = FleetEntry(name=name,
-                                                  root=Path(entry["root"]))
+                        # Resolve on load so a hand-edited relative root
+                        # (e.g. "../repos") doesn't resolve differently
+                        # depending on the CLI's current directory.
+                        fleets[name] = FleetEntry(
+                            name=name,
+                            root=Path(entry["root"]).expanduser().resolve(),
+                        )
             default = data.get("default") if isinstance(data, dict) else None
             if not isinstance(default, str) or default not in fleets:
                 default = None
@@ -180,12 +185,21 @@ class FleetsConfig:
         if self.default is None:
             self.default = name
 
-    def remove(self, name: str) -> None:
+    def remove(self, name: str) -> bool:
+        """Remove fleet ``name``. Returns True if it was the active default.
+
+        When the default is removed we deliberately do NOT auto-pick a
+        replacement: silently promoting the alphabetically-first remaining
+        fleet risks pointing later commands at the wrong repos. The default
+        is cleared and the caller prompts the user to choose explicitly.
+        """
         if name not in self.fleets:
             raise FleetError(f"No such fleet: '{name}'")
         del self.fleets[name]
-        if self.default == name:
-            self.default = sorted(self.fleets)[0] if self.fleets else None
+        was_default = self.default == name
+        if was_default:
+            self.default = None
+        return was_default
 
     def set_default(self, name: str) -> None:
         if name not in self.fleets:
@@ -194,6 +208,32 @@ class FleetsConfig:
                 f"Known fleets: {', '.join(sorted(self.fleets)) or '(none)'}"
             )
         self.default = name
+
+    def rename(self, old: str, new: str) -> None:
+        """Rename fleet ``old`` to ``new``, preserving its root and default-ness.
+
+        Does not touch anything on disk under the fleet root (``fleet.json``,
+        tasks, branches): only the registry mapping changes. Task branches are
+        namespaced by fleet name, so existing ``task/<old>/...`` branches keep
+        their old name — the caller is told as much by the command handler.
+        """
+        if old not in self.fleets:
+            raise FleetError(
+                f"No such fleet: '{old}'. "
+                f"Known fleets: {', '.join(sorted(self.fleets)) or '(none)'}"
+            )
+        if old == new:
+            return
+        _validate_fleet_name(new)
+        if new in self.fleets:
+            raise FleetError(
+                f"Fleet '{new}' already exists (root: {self.fleets[new].root}). "
+                f"Pick a different name or remove it first."
+            )
+        entry = self.fleets.pop(old)
+        self.fleets[new] = FleetEntry(name=new, root=entry.root)
+        if self.default == old:
+            self.default = new
 
     # ------------------------------ resolution -------------------------------
 

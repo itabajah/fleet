@@ -92,9 +92,16 @@ def cmd_list(args: argparse.Namespace) -> int:
                 if not r.worktree_path.is_dir():
                     missing += 1
                     continue
-                if git_ops.is_dirty(r.worktree_path):
-                    dirty_count += 1
-                n = git_ops.unpushed_count(r.worktree_path, manifest.branch)
+                # A worktree can vanish or its git state break between the
+                # is_dir() check and these calls; treat any git failure as
+                # "missing" so one bad repo doesn't abort the whole listing.
+                try:
+                    if git_ops.is_dirty(r.worktree_path):
+                        dirty_count += 1
+                    n = git_ops.unpushed_count(r.worktree_path, manifest.branch)
+                except FleetError:
+                    missing += 1
+                    continue
                 if n is None:
                     unpushed_unknown += 1
                 elif n > 0:
@@ -178,10 +185,14 @@ def cmd_info(args: argparse.Namespace) -> int:
         if not r.worktree_path.is_dir():
             print(f"      status:    {red('worktree directory missing')}")
             continue
-        flags: list[str] = []
-        if git_ops.is_dirty(r.worktree_path):
-            flags.append(red("dirty"))
-        n = git_ops.unpushed_count(r.worktree_path, manifest.branch)
+        try:
+            flags: list[str] = []
+            if git_ops.is_dirty(r.worktree_path):
+                flags.append(red("dirty"))
+            n = git_ops.unpushed_count(r.worktree_path, manifest.branch)
+        except FleetError as e:
+            print(f"      status:    {red(f'unavailable ({e})')}")
+            continue
         if n is None:
             flags.append(yellow("never pushed"))
         elif n > 0:

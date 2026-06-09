@@ -9,8 +9,10 @@ stays identical to ``task new``.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import shutil
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 from fleet import git_ops
@@ -19,7 +21,7 @@ from fleet.console import yellow
 from fleet.discovery import RepoInfo, discover_repos
 from fleet.errors import FleetError
 from fleet.state import tasks_root
-from fleet.tasks.manifest import Manifest, RepoEntry
+from fleet.tasks.manifest import Manifest, RepoEntry, task_lock
 from fleet.tasks.validation import (
     require_repo_in_task,
     resolve_repo,
@@ -29,9 +31,8 @@ from fleet.tasks.validation import (
 from fleet.tasks.worktree import (
     add_worktree,
     assert_no_leaf_collision,
-    prepare_canonical,
+    prepare_canonicals_parallel,
 )
-
 
 # ---------------------------------------------------------------------------
 # shared helpers
@@ -47,12 +48,20 @@ def _split_repo_tokens(raw: str) -> list[str]:
     return tokens
 
 
-def _load_task(name: str) -> tuple[Path, Manifest]:
+@contextlib.contextmanager
+def _locked_task(name: str) -> Iterator[tuple[Path, Manifest]]:
+    """Validate, lock, and load a task for a read-modify-write command.
+
+    Holds the per-task lock for the whole ``with`` block so two concurrent
+    mutating commands on the same task (e.g. ``add-repo`` racing ``edit``)
+    can't both load, both save, and silently drop one update.
+    """
     validate_task_name(name)
     workspace = tasks_root() / name
     if not workspace.is_dir():
         raise FleetError(f"No such task: {workspace}")
-    return workspace, Manifest.load(workspace)
+    with task_lock(workspace):
+        yield workspace, Manifest.load(workspace)
 
 
 # ---------------------------------------------------------------------------
@@ -61,92 +70,95 @@ def _load_task(name: str) -> tuple[Path, Manifest]:
 
 def cmd_add_repo(args: argparse.Namespace) -> int:
     name: str = args.name
-    workspace, manifest = _load_task(name)
-    tokens = _split_repo_tokens(args.repos)
+    with _locked_task(name) as (workspace, manifest):
+        tokens = _split_repo_tokens(args.repos)
 
-    all_repos = discover_repos()
-    if not all_repos:
-        raise FleetError("No repos discovered under the configured Repos root.")
+        all_repos = discover_repos()
+        if not all_repos:
+            raise FleetError("No repos discovered under the configured Repos root.")
 
-    existing_keys = {(r.group or "", r.name) for r in manifest.repos}
-    existing_leaves = {r.name for r in manifest.repos}
+        existing_keys = {(r.group or "", r.name) for r in manifest.repos}
+        existing_leaves = {r.name for r in manifest.repos}
 
-    seen: set[tuple[str, str]] = set()
-    chosen: list[RepoInfo] = []
-    for tok in tokens:
-        repo = resolve_repo(tok, all_repos)
-        key = (repo.group_path, repo.name)
-        if key in existing_keys:
-            raise FleetError(
-                f"Repo '{repo.display_name}' is already in task '{name}'."
-            )
-        if key in seen:
-            print(f"note: ignoring duplicate '{tok}'")
-            continue
-        seen.add(key)
-        chosen.append(repo)
+        seen: set[tuple[str, str]] = set()
+        chosen: list[RepoInfo] = []
+        for tok in tokens:
+            repo = resolve_repo(tok, all_repos)
+            key = (repo.group_path, repo.name)
+            if key in existing_keys:
+                raise FleetError(
+                    f"Repo '{repo.display_name}' is already in task '{name}'."
+                )
+            if key in seen:
+                print(f"note: ignoring duplicate '{tok}'")
+                continue
+            seen.add(key)
+            chosen.append(repo)
 
-    # Leaf collision: among new repos, and against existing manifest entries.
-    # Case-insensitive on Windows/macOS so 'Foo' vs 'foo' is caught before
-    # the second ``git worktree add`` fails mid-scaffold.
-    assert_no_leaf_collision(chosen, workspace,
-                             existing_leaves=existing_leaves)
+        # Leaf collision: among new repos, and against existing manifest entries.
+        # Case-insensitive on Windows/macOS so 'Foo' vs 'foo' is caught before
+        # the second ``git worktree add`` fails mid-scaffold.
+        assert_no_leaf_collision(chosen, workspace,
+                                 existing_leaves=existing_leaves)
 
-    branch = task_branch(name)
-    print(f"Adding {len(chosen)} repo(s) to task '{name}' (branch {branch}):")
-    for r in chosen:
-        print(f"  - {r.display_name}")
-
-    if args.dry_run:
-        print(yellow("--dry-run: would pull each canonical and create one "
-                     "worktree per repo at:"))
+        branch = task_branch(name)
+        print(f"Adding {len(chosen)} repo(s) to task '{name}' (branch {branch}):")
         for r in chosen:
-            print(f"  {workspace / r.name}")
-        return 0
+            print(f"  - {r.display_name}")
 
-    # Each entry: (repo, worktree_path, branch_name, branch_is_new). Only
-    # delete branches we created in THIS invocation during rollback —
-    # reattached pre-existing branches (typical after a remove-repo cycle)
-    # must not be destroyed.
-    created: list[tuple[RepoInfo, Path, str, bool]] = []
-    try:
-        for repo in chosen:
-            default = prepare_canonical(repo, no_pull=args.no_pull)
-            wt, branch_is_new = add_worktree(
-                repo, name, default, workspace, reuse_existing=True,
-            )
-            created.append((repo, wt, branch, branch_is_new))
+        if args.dry_run:
+            print(yellow("--dry-run: would pull each canonical and create one "
+                         "worktree per repo at:"))
+            for r in chosen:
+                print(f"  {workspace / r.name}")
+            return 0
 
-        new_entries = [
-            RepoEntry(
-                name=r.name,
-                group=r.group_path or None,
-                canonical_path=r.path,
-                worktree_path=workspace / r.name,
-            )
-            for r in chosen
-        ]
-        manifest.add_repos(new_entries)
-        manifest.save(workspace)
-    except BaseException:
-        print("\nERROR adding repos — rolling back created worktrees...",
-              file=sys.stderr)
-        for repo, wt, br, branch_is_new in created:
-            git_ops.run_git("worktree", "remove", "--force", str(wt),
-                            cwd=repo.path, check=False)
-            if branch_is_new:
-                git_ops.run_git("branch", "-D", br,
+        # Each entry: (repo, worktree_path, branch_name, branch_is_new). Only
+        # delete branches we created in THIS invocation during rollback —
+        # reattached pre-existing branches (typical after a remove-repo cycle)
+        # must not be destroyed.
+        created: list[tuple[RepoInfo, Path, str, bool]] = []
+        try:
+            # Prepare canonicals concurrently, then create worktrees serially.
+            branch_by_repo = prepare_canonicals_parallel(
+                chosen, no_pull=args.no_pull)
+            for repo in chosen:
+                default = branch_by_repo[id(repo)]
+                wt, branch_is_new = add_worktree(
+                    repo, name, default, workspace, reuse_existing=True,
+                )
+                created.append((repo, wt, branch, branch_is_new))
+
+            new_entries = [
+                RepoEntry(
+                    name=r.name,
+                    group=r.group_path or None,
+                    canonical_path=r.path,
+                    worktree_path=workspace / r.name,
+                )
+                for r in chosen
+            ]
+            manifest.add_repos(new_entries)
+            manifest.save(workspace)
+        except BaseException:
+            print("\nERROR adding repos — rolling back created worktrees...",
+                  file=sys.stderr)
+            for repo, wt, br, branch_is_new in created:
+                git_ops.run_git("worktree", "remove", "--force", str(wt),
                                 cwd=repo.path, check=False)
-        raise
+                if branch_is_new:
+                    git_ops.run_git("branch", "-D", br,
+                                    cwd=repo.path, check=False)
+            raise
 
-    try:
-        _append_context_repos(workspace, chosen)
-    except OSError as e:
-        print(yellow(f"note: couldn't update context.md ({e}); "
-                     "task.json was saved."), file=sys.stderr)
+        try:
+            _append_context_repos(workspace, chosen)
+        except OSError as e:
+            print(yellow(f"note: couldn't update context.md ({e}); "
+                         "task.json was saved."), file=sys.stderr)
 
-    print(f"\nUpdated task.json (now {len(manifest.repos)} repo(s)).")
-    return 0
+        print(f"\nUpdated task.json (now {len(manifest.repos)} repo(s)).")
+        return 0
 
 
 def _append_context_repos(workspace: Path, added: list[RepoInfo]) -> None:
@@ -178,101 +190,101 @@ def _append_context_repos(workspace: Path, added: list[RepoInfo]) -> None:
 
 def cmd_remove_repo(args: argparse.Namespace) -> int:
     name: str = args.name
-    workspace, manifest = _load_task(name)
-    tokens = _split_repo_tokens(args.repos)
+    with _locked_task(name) as (workspace, manifest):
+        tokens = _split_repo_tokens(args.repos)
 
-    targets: list[RepoEntry] = []
-    seen: set[str] = set()
-    for tok in tokens:
-        entry = require_repo_in_task(tok, manifest)
-        if entry.name in seen:
-            print(f"note: ignoring duplicate '{tok}'")
-            continue
-        seen.add(entry.name)
-        targets.append(entry)
+        targets: list[RepoEntry] = []
+        seen: set[str] = set()
+        for tok in tokens:
+            entry = require_repo_in_task(tok, manifest)
+            if entry.name in seen:
+                print(f"note: ignoring duplicate '{tok}'")
+                continue
+            seen.add(entry.name)
+            targets.append(entry)
 
-    branch = manifest.branch
+        branch = manifest.branch
 
-    dirty: list[str] = []
-    unpushed_warnings: list[str] = []
-    for r in targets:
-        if not r.worktree_path.is_dir():
-            continue
-        if git_ops.is_dirty(r.worktree_path):
-            dirty.append(r.name)
-        n = git_ops.unpushed_count(r.worktree_path, branch)
-        if n is None:
-            unpushed_warnings.append(
-                f"  {r.name}: branch '{branch}' was never pushed"
+        dirty: list[str] = []
+        unpushed_warnings: list[str] = []
+        for r in targets:
+            if not r.worktree_path.is_dir():
+                continue
+            if git_ops.is_dirty(r.worktree_path):
+                dirty.append(r.name)
+            n = git_ops.unpushed_count(r.worktree_path, branch)
+            if n is None:
+                unpushed_warnings.append(
+                    f"  {r.name}: branch '{branch}' was never pushed"
+                )
+            elif n > 0:
+                unpushed_warnings.append(
+                    f"  {r.name}: {n} unpushed commit(s) on '{branch}'"
+                )
+
+        if dirty and not args.force:
+            raise FleetError(
+                "Refusing to remove — uncommitted changes in: "
+                + ", ".join(dirty)
+                + "\nCommit/stash, or re-run with --force."
             )
-        elif n > 0:
-            unpushed_warnings.append(
-                f"  {r.name}: {n} unpushed commit(s) on '{branch}'"
+        if dirty and args.force:
+            print(f"WARN: --force ignoring uncommitted changes in: "
+                  f"{', '.join(dirty)}")
+        if unpushed_warnings:
+            print("WARN: unpushed work that will become orphan-able once "
+                  "the worktree is removed:")
+            for line in unpushed_warnings:
+                print(line)
+            print("(branch stays in the canonical repo, so this is recoverable.)")
+
+        print(f"Removing {len(targets)} repo(s) from task '{name}':")
+        for r in targets:
+            print(f"  - {r.display_name}")
+
+        if args.dry_run:
+            print(yellow("--dry-run: would remove the above worktree(s) and "
+                         "drop them from task.json."))
+            return 0
+
+        removed_names: set[str] = set()
+        failures: list[str] = []
+        for r in targets:
+            if not r.worktree_path.is_dir():
+                print(f"  {r.name}: worktree dir already gone; dropping from manifest")
+                removed_names.add(r.name)
+                continue
+            flag = ["--force"] if args.force else []
+            proc = git_ops.run_git(
+                "worktree", "remove", *flag, str(r.worktree_path),
+                cwd=r.canonical_path, check=False,
             )
+            if proc.ok:
+                print(f"  removed worktree {r.name}")
+                removed_names.add(r.name)
+            else:
+                failures.append(f"  {r.name}: {proc.stderr.strip()}")
 
-    if dirty and not args.force:
-        raise FleetError(
-            "Refusing to remove — uncommitted changes in: "
-            + ", ".join(dirty)
-            + "\nCommit/stash, or re-run with --force."
-        )
-    if dirty and args.force:
-        print(f"WARN: --force ignoring uncommitted changes in: "
-              f"{', '.join(dirty)}")
-    if unpushed_warnings:
-        print("WARN: unpushed work that will become orphan-able once "
-              "the worktree is removed:")
-        for line in unpushed_warnings:
-            print(line)
-        print("(branch stays in the canonical repo, so this is recoverable.)")
+        for r in targets:
+            if r.canonical_path.is_dir():
+                git_ops.run_git("worktree", "prune",
+                                cwd=r.canonical_path, check=False)
 
-    print(f"Removing {len(targets)} repo(s) from task '{name}':")
-    for r in targets:
-        print(f"  - {r.display_name}")
+        if removed_names:
+            manifest.remove_repos(removed_names)
+            manifest.save(workspace)
 
-    if args.dry_run:
-        print(yellow("--dry-run: would remove the above worktree(s) and "
-                     "drop them from task.json."))
+        if not manifest.repos:
+            print(yellow(f"WARN: task '{name}' now has no repos."))
+
+        if failures:
+            print("\nWARN: some worktrees could not be removed:", file=sys.stderr)
+            for line in failures:
+                print(line, file=sys.stderr)
+            return 2
+
+        print(f"\nUpdated task.json (now {len(manifest.repos)} repo(s)).")
         return 0
-
-    removed_names: set[str] = set()
-    failures: list[str] = []
-    for r in targets:
-        if not r.worktree_path.is_dir():
-            print(f"  {r.name}: worktree dir already gone; dropping from manifest")
-            removed_names.add(r.name)
-            continue
-        flag = ["--force"] if args.force else []
-        proc = git_ops.run_git(
-            "worktree", "remove", *flag, str(r.worktree_path),
-            cwd=r.canonical_path, check=False,
-        )
-        if proc.ok:
-            print(f"  removed worktree {r.name}")
-            removed_names.add(r.name)
-        else:
-            failures.append(f"  {r.name}: {proc.stderr.strip()}")
-
-    for r in targets:
-        if r.canonical_path.is_dir():
-            git_ops.run_git("worktree", "prune",
-                            cwd=r.canonical_path, check=False)
-
-    if removed_names:
-        manifest.remove_repos(removed_names)
-        manifest.save(workspace)
-
-    if not manifest.repos:
-        print(yellow(f"WARN: task '{name}' now has no repos."))
-
-    if failures:
-        print("\nWARN: some worktrees could not be removed:", file=sys.stderr)
-        for line in failures:
-            print(line, file=sys.stderr)
-        return 2
-
-    print(f"\nUpdated task.json (now {len(manifest.repos)} repo(s)).")
-    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -350,9 +362,20 @@ def cmd_rename(args: argparse.Namespace) -> int:
         ) from e
     print(f"  moved workspace -> {new_workspace}")
 
-    # Step 3: rewrite manifest (atomic) + patch context.md header.
+    # Step 3: rewrite manifest (atomic). If the save fails, undo the move
+    # AND the branch renames so we never strand the workspace at its new
+    # path with a manifest that still describes the old name/branch/paths.
     manifest.rename(new, new_branch, new_workspace)
-    manifest.save(new_workspace)
+    try:
+        manifest.save(new_workspace)
+    except BaseException:
+        print("\nERROR writing renamed task.json; reverting workspace move "
+              "and branch renames...", file=sys.stderr)
+        with contextlib.suppress(OSError):
+            shutil.move(str(new_workspace), str(old_workspace))
+        for done in renamed:
+            git_ops.rename_branch(done, new_branch, old_branch)
+        raise
 
     # Step 4: repair each canonical's worktree record so git knows where
     # the moved worktree lives. Without this, `git worktree remove/list`
@@ -368,7 +391,7 @@ def cmd_rename(args: argparse.Namespace) -> int:
         print(yellow(f"note: couldn't update context.md ({e}); "
                      "task.json was saved."), file=sys.stderr)
 
-    print(f"  rewrote task.json + context.md")
+    print("  rewrote task.json + context.md")
     print(f"\nDone. (If you were inside the old workspace, "
           f"cd to {new_workspace}.)")
     return 0
@@ -402,38 +425,37 @@ def _rewrite_context_header(workspace: Path, old: str, new: str,
 
 def cmd_edit(args: argparse.Namespace) -> int:
     name: str = args.name
-    workspace, manifest = _load_task(name)
+    with _locked_task(name) as (workspace, manifest):
+        description = args.description
+        file_arg: str | None = args.description_file
 
-    description = args.description
-    file_arg: str | None = args.description_file
+        if description is None and file_arg is None:
+            raise FleetError(
+                "task edit needs --description TEXT or --description-file PATH."
+            )
 
-    if description is None and file_arg is None:
-        raise FleetError(
-            "task edit needs --description TEXT or --description-file PATH."
-        )
+        if file_arg is not None:
+            if file_arg == "-":
+                description = sys.stdin.read()
+            else:
+                try:
+                    description = Path(file_arg).read_text(encoding="utf-8")
+                except OSError as e:
+                    raise FleetError(
+                        f"Couldn't read --description-file {file_arg}: {e}"
+                    ) from e
 
-    if file_arg is not None:
-        if file_arg == "-":
-            description = sys.stdin.read()
-        else:
-            try:
-                description = Path(file_arg).read_text(encoding="utf-8")
-            except OSError as e:
-                raise FleetError(
-                    f"Couldn't read --description-file {file_arg}: {e}"
-                ) from e
+        manifest.description = description
+        manifest.save(workspace)
 
-    manifest.description = description
-    manifest.save(workspace)
+        try:
+            _rewrite_context_description(workspace, description)
+        except OSError as e:
+            print(yellow(f"note: couldn't update context.md ({e}); "
+                         "task.json was saved."), file=sys.stderr)
 
-    try:
-        _rewrite_context_description(workspace, description)
-    except OSError as e:
-        print(yellow(f"note: couldn't update context.md ({e}); "
-                     "task.json was saved."), file=sys.stderr)
-
-    print(f"Updated description for task '{name}'.")
-    return 0
+        print(f"Updated description for task '{name}'.")
+        return 0
 
 
 def _rewrite_context_description(workspace: Path, description: str) -> None:

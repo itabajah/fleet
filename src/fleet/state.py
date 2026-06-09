@@ -21,13 +21,17 @@ from fleet.paths import BUNDLES_FILENAME, REGISTRY_FILENAME, tasks_root_base
 
 _repos_root: Path | None = None
 _active_fleet_name: str | None = None
+_registry_cache: dict | None = None
+_registry_cache_path: Path | None = None
 
 
 def reset_state() -> None:
     """Wipe pinned active-fleet state. Used by tests; harmless in CLI runs."""
-    global _repos_root, _active_fleet_name
+    global _repos_root, _active_fleet_name, _registry_cache, _registry_cache_path
     _repos_root = None
     _active_fleet_name = None
+    _registry_cache = None
+    _registry_cache_path = None
 
 
 def set_active_fleet(name: str, root: Path) -> None:
@@ -100,24 +104,60 @@ def bundles_path() -> Path:
 
 
 def load_registry() -> dict:
-    """Load and return the registry as a dict, or {} if it doesn't exist."""
+    """Load and return the registry as a dict, or {} if it doesn't exist.
+
+    Cached per invocation (keyed by path) so a command that consults the
+    registry several times — discovery, then validation, then save — reads
+    ``fleet.json`` from disk once. The cache is cleared by
+    :func:`reset_state` (tests) and whenever the active fleet changes.
+    """
+    global _registry_cache, _registry_cache_path
     path = registry_path()
+    if _registry_cache is not None and _registry_cache_path == path:
+        return _registry_cache
     if not path.is_file():
-        return {}
+        _registry_cache = {}
+        _registry_cache_path = path
+        return _registry_cache
     try:
-        return json.loads(path.read_text(encoding="utf-8-sig"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
     except json.JSONDecodeError as e:
         raise FleetError(f"Malformed registry at {path}: {e}") from e
+    _registry_cache = data
+    _registry_cache_path = path
+    return data
+
+
+def invalidate_registry_cache() -> None:
+    """Drop the cached registry so the next :func:`load_registry` re-reads disk.
+
+    Called after ``fleet scan`` rewrites ``fleet.json`` within the same
+    process (tests, or any future in-process re-scan).
+    """
+    global _registry_cache, _registry_cache_path
+    _registry_cache = None
+    _registry_cache_path = None
 
 
 def sync_root() -> Path:
-    """Resolve the registry's ``root`` field (relative to repos root)."""
+    """Resolve the registry's ``root`` field (relative to repos root).
+
+    Raises :class:`FleetError` if the resolved path doesn't exist, so a
+    stale ``root`` surfaces a clear message here rather than a confusing
+    "no repos found" deep inside sync/discovery.
+    """
     reg = load_registry()
     root = reg.get("root") if isinstance(reg, dict) else None
     base = find_repos_root()
     if not root or root == ".":
         return base
-    return (base / root).resolve()
+    resolved = (base / root).resolve()
+    if not resolved.is_dir():
+        raise FleetError(
+            f"The registry 'root' ({root!r}) resolves to {resolved}, which "
+            f"does not exist. Edit {registry_path()} or re-run `fleet scan`."
+        )
+    return resolved
 
 
 def tasks_root() -> Path:

@@ -22,7 +22,6 @@ from fleet.tasks.lifecycle import cmd_end, cmd_new
 from fleet.tasks.manifest import Manifest
 from helpers.git import make_dirty
 
-
 # ---------------------------------------------------------------------------
 # argparse.Namespace builders
 # ---------------------------------------------------------------------------

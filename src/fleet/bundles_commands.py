@@ -128,6 +128,15 @@ def cmd_bundles_remove(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_bundles_rename(args: argparse.Namespace) -> int:
+    with _config_lock(bundles_path()):
+        cfg = BundlesConfig.load()
+        cfg.rename(args.old, args.new)
+        cfg.save()
+    print(green(f"✓ Bundle '{args.old}' → '{args.new}'."))
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # bundles edit
 # ---------------------------------------------------------------------------
@@ -192,6 +201,12 @@ def register(subparsers: argparse._SubParsersAction,
                           help="delete a bundle (config only; no git changes)")
     b_rm.add_argument("name", help="bundle name")
     b_rm.set_defaults(func=cmd_bundles_remove)
+
+    b_ren = sub.add_parser("rename", parents=[fleet_arg],
+                           help="rename a bundle (config only)")
+    b_ren.add_argument("old", help="current bundle name")
+    b_ren.add_argument("new", help="new bundle name")
+    b_ren.set_defaults(func=cmd_bundles_rename)
 
     b_edit = sub.add_parser("edit", parents=[fleet_arg],
                             help="add and/or remove members of a bundle")

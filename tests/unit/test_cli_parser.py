@@ -16,7 +16,7 @@ def test_top_level_subcommands() -> None:
                       if isinstance(a, argparse._SubParsersAction))
     assert set(sub_action.choices) == {
         "sync", "scan", "repos", "task", "fleets", "bundles",
-        "open", "completion",
+        "doctor", "open", "completion",
     }
 
 
@@ -40,7 +40,7 @@ def test_fleets_subcommands() -> None:
     fleets_parser = sub_action.choices["fleets"]
     fleets_sub = next(a for a in fleets_parser._actions
                       if isinstance(a, argparse._SubParsersAction))
-    assert set(fleets_sub.choices) == {"list", "add", "default", "remove"}
+    assert set(fleets_sub.choices) == {"list", "add", "default", "remove", "rename"}
 
 
 def test_version_action(capsys: pytest.CaptureFixture[str]) -> None:

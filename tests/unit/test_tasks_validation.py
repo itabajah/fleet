@@ -39,6 +39,17 @@ def test_invalid_names(bad: str) -> None:
         validate_task_name(bad)
 
 
+@pytest.mark.parametrize("reserved", [
+    "CON", "con", "PRN", "AUX", "NUL",
+    "COM1", "LPT1", "com9", "lpt9",
+    "CON.txt", "nul.log",
+])
+def test_rejects_windows_reserved_names(reserved: str) -> None:
+    with pytest.raises(FleetError, match="reserved device name"):
+        validate_task_name(reserved)
+
+
+
 # ---------------------------------------------------------------------------
 # task_branch
 # ---------------------------------------------------------------------------

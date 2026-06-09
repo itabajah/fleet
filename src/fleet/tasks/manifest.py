@@ -11,6 +11,8 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import time
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +20,73 @@ from pathlib import Path
 from fleet.errors import FleetError
 
 MANIFEST_FILENAME = "task.json"
+LOCK_FILENAME = ".task.lock"
+
+# Bump when the on-disk schema changes in a way that needs migration. v1 is
+# the first explicitly-versioned schema; manifests written before versioning
+# simply omit the field and are read as v1.
+MANIFEST_VERSION = 1
+
+_LOCK_TIMEOUT_SECONDS = 10.0
+_LOCK_POLL_SECONDS = 0.05
+
+
+@contextlib.contextmanager
+def task_lock(workspace: Path) -> Iterator[None]:
+    """Cross-process lock around a single task's read-modify-write.
+
+    Concurrent ``fleet task`` commands on the *same* task (e.g. ``add-repo``
+    racing ``edit``) would otherwise clobber each other's manifest writes.
+    Uses an exclusive-create sidecar (``<workspace>/.task.lock``). Raises
+    :class:`FleetError` if the lock can't be acquired within the timeout
+    (a peer process is mid-write, or a crash left a stale lock to remove).
+    """
+    lock_path = workspace / LOCK_FILENAME
+    deadline = time.monotonic() + _LOCK_TIMEOUT_SECONDS
+    fd: int | None = None
+    while True:
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            break
+        except FileExistsError:
+            if time.monotonic() >= deadline:
+                raise FleetError(
+                    f"Could not lock task at {workspace} after "
+                    f"{_LOCK_TIMEOUT_SECONDS:g}s ({lock_path} is held). "
+                    f"Another fleet task command may be running; if not, "
+                    f"delete the lock file and retry."
+                ) from None
+            time.sleep(_LOCK_POLL_SECONDS)
+        except OSError as e:
+            raise FleetError(
+                f"Could not create task lock {lock_path}: {e}"
+            ) from e
+    try:
+        yield
+    finally:
+        if fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        with contextlib.suppress(OSError):
+            lock_path.unlink()
+
+
+def _migrate_raw(raw: dict, version: int, workspace: Path) -> dict:
+    """Upgrade an older manifest dict to the current schema (in-memory).
+
+    No historical versions exist yet (v1 is the first), so this is a
+    structural seam: future schema bumps add upgrade branches here. A
+    *newer* version than this build understands is rejected, so a
+    downgraded fleet can't silently misread a manifest written by a newer
+    one.
+    """
+    if version > MANIFEST_VERSION:
+        raise FleetError(
+            f"task.json in {workspace} is schema version {version}, but this "
+            f"fleet build only understands up to {MANIFEST_VERSION}. "
+            f"Upgrade fleet."
+        )
+    return raw
 
 
 def now_iso() -> str:
@@ -103,6 +172,7 @@ class Manifest:
     created_at: str
     description: str
     repos: list[RepoEntry] = field(default_factory=list)
+    version: int = MANIFEST_VERSION
 
     # ------------------------------ I/O --------------------------------------
 
@@ -130,6 +200,9 @@ class Manifest:
                 f"Malformed task.json in {workspace}: top-level value is "
                 f"not an object."
             )
+        raw_version = raw.get("version")
+        version = raw_version if isinstance(raw_version, int) else MANIFEST_VERSION
+        raw = _migrate_raw(raw, version, workspace)
         name = raw.get("name")
         branch = raw.get("branch")
         if not isinstance(name, str) or not name:
@@ -170,6 +243,7 @@ class Manifest:
             created_at=created_at,
             description=description,
             repos=repos,
+            version=MANIFEST_VERSION,
         )
 
     @classmethod
@@ -185,9 +259,16 @@ class Manifest:
             return None
 
     def save(self, workspace: Path) -> None:
-        """Atomically write the manifest to ``<workspace>/task.json``."""
+        """Atomically write the manifest to ``<workspace>/task.json``.
+
+        Raises a user-actionable :class:`FleetError` (not a raw ``OSError``)
+        when the destination can't be replaced — most commonly because the
+        file is open/locked (Windows holds a share lock while VS Code has
+        ``task.json`` open). The temp file is always cleaned up.
+        """
         manifest_path = workspace / MANIFEST_FILENAME
         payload = {
+            "version": MANIFEST_VERSION,
             "name": self.name,
             "branch": self.branch,
             "created_at": self.created_at,
@@ -195,15 +276,18 @@ class Manifest:
             "repos": [r.to_dict() for r in self.repos],
         }
         tmp = manifest_path.with_suffix(manifest_path.suffix + ".tmp")
-        tmp.write_text(
-            json.dumps(payload, indent=2) + "\n", encoding="utf-8",
-        )
         try:
+            tmp.write_text(
+                json.dumps(payload, indent=2) + "\n", encoding="utf-8",
+            )
             os.replace(tmp, manifest_path)
-        except OSError:
+        except OSError as e:
             with contextlib.suppress(OSError):
                 tmp.unlink()
-            raise
+            raise FleetError(
+                f"Failed to write {manifest_path}: {e}. "
+                f"If the file is open elsewhere (VS Code?), close it and retry."
+            ) from e
 
     # ------------------------------ helpers ----------------------------------
 

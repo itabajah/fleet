@@ -33,10 +33,16 @@ from __future__ import annotations
 import argparse
 import contextlib
 import sys
+import threading
 from collections.abc import Callable, Iterable, Sequence
 
 DIRECTIVE_DEFAULT = 0
 DIRECTIVE_NOSPACE = 4
+
+# Hard ceiling on how long dynamic completion may run before we give up and
+# return nothing. A slow disk walk or a hung network mount must never freeze
+# the user's shell waiting on <Tab>.
+_COMPLETION_TIMEOUT_SECONDS = 1.5
 
 # ---------------------------------------------------------------------------
 # Parser introspection helpers
@@ -273,9 +279,11 @@ POS_PROVIDERS: dict[tuple[str, ...], ValueProvider] = {
     ("open",): lambda w: _task_names(w),
     ("fleets", "default"): lambda w: _fleet_names(w),
     ("fleets", "remove"): lambda w: _fleet_names(w),
+    ("fleets", "rename"): lambda w: _fleet_names(w),
     ("bundles", "show"): lambda w: _bundle_names(w),
     ("bundles", "remove"): lambda w: _bundle_names(w),
     ("bundles", "edit"): lambda w: _bundle_names(w),
+    ("bundles", "rename"): lambda w: _bundle_names(w),
 }
 
 # Option value providers keyed by option string. Applies on any subcommand
@@ -332,18 +340,21 @@ def _filter_prefix(cands: Iterable[str], prefix: str) -> list[str]:
 
 def _complete_option_value(
     action: argparse.Action, current: str, words: Sequence[str],
+    cmd_path: tuple[str, ...] = (),
 ) -> tuple[int, list[str]]:
     if action.choices:
         cands = sorted(str(c) for c in action.choices)
         return DIRECTIVE_DEFAULT, _filter_prefix(cands, current)
 
+    provider: ValueProvider | None = None
+
     # ``bundles edit --add/--remove`` are comma-separated repo-token lists
-    # scoped to the named bundle. Handled here (rather than via
-    # OPT_PROVIDERS) so the ``--add``/``--remove`` option names don't leak
-    # generic repo-name completion onto any future unrelated subcommand
-    # that happens to use the same flag spelling.
+    # scoped to the named bundle. Gate on the resolved subcommand chain
+    # (``cmd_path``) rather than a loose ``"edit" in words`` substring, so a
+    # value that merely contains the word "edit" (or a future unrelated
+    # subcommand reusing ``--add``) can't trigger bundle-scoped completion.
     if (
-        "bundles" in words and "edit" in words
+        cmd_path == ("bundles", "edit")
         and any(s in ("--add", "--remove") for s in action.option_strings)
     ):
         if "--add" in action.option_strings:
@@ -357,7 +368,6 @@ def _complete_option_value(
                     if r not in already and r.startswith(tail)]
         return DIRECTIVE_NOSPACE, [f"{prefix}{r}" for r in filtered]
 
-    provider: ValueProvider | None = None
     for s in action.option_strings:
         if s in OPT_PROVIDERS:
             provider = OPT_PROVIDERS[s]
@@ -372,9 +382,9 @@ def _complete_option_value(
     # are always offered alongside raw repo names so users discover
     # bundles inline.
     if "--repos" in action.option_strings:
-        if "add-repo" in words:
+        if cmd_path == ("task", "add-repo"):
             provider = _repo_names_not_in_task
-        elif "remove-repo" in words:
+        elif cmd_path == ("task", "remove-repo"):
             provider = _repo_names_in_task
         head, sep, tail = current.rpartition(",")
         prefix = f"{head}{sep}" if sep else ""
@@ -411,14 +421,14 @@ def complete(words: Sequence[str]) -> tuple[int, list[str]]:
         last = prev[-1]
         last_opt = _find_option(cur_parser, last)
         if last_opt is not None and _option_takes_value(last_opt):
-            return _complete_option_value(last_opt, current, words)
+            return _complete_option_value(last_opt, current, words, cmd_path)
 
     # `--opt=val<TAB>` form on the current token.
     if current.startswith("--") and "=" in current:
         name, _, val = current.partition("=")
         opt = _find_option(cur_parser, name)
         if opt is not None and _option_takes_value(opt):
-            directive, cands = _complete_option_value(opt, val, words)
+            directive, cands = _complete_option_value(opt, val, words, cmd_path)
             return directive, [f"{name}={c}" for c in cands]
 
     # Completing an option (current starts with `-`).
@@ -450,16 +460,51 @@ def complete(words: Sequence[str]) -> tuple[int, list[str]]:
 # Entry points used by cli.py
 # ---------------------------------------------------------------------------
 
+def _complete_within_timeout(
+    words: Sequence[str],
+) -> tuple[int, list[str]]:
+    """Run :func:`complete` on a daemon thread with a hard timeout.
+
+    A misconfigured environment, a slow network mount, or a huge repo tree
+    must never hang the shell. If completion doesn't finish within
+    :data:`_COMPLETION_TIMEOUT_SECONDS` we abandon the worker (it dies with
+    the one-shot ``fleet __complete`` process) and return no candidates.
+    """
+    box: list[tuple[int, list[str]]] = [(DIRECTIVE_DEFAULT, [])]
+
+    def _run() -> None:
+        with contextlib.suppress(Exception):
+            box[0] = complete(list(words))
+
+    worker = threading.Thread(target=_run, daemon=True)
+    worker.start()
+    worker.join(_COMPLETION_TIMEOUT_SECONDS)
+    return box[0]
+
+
+def _sanitize(candidate: str) -> str:
+    """Collapse anything that would corrupt the one-per-line wire protocol.
+
+    A candidate containing a newline would be read by the shell as two
+    separate completions; a stray carriage return mangles the line. Strip
+    both (and surrounding whitespace) so each candidate stays a single line.
+    """
+    return candidate.replace("\r", "").replace("\n", " ").strip()
+
+
 def render(words: Sequence[str]) -> None:
     """Print ``:directive`` + candidates to stdout. Never raises."""
     directive = DIRECTIVE_DEFAULT
     cands: list[str] = []
     with contextlib.suppress(Exception):
-        directive, cands = complete(list(words))
+        directive, cands = _complete_within_timeout(list(words))
     out = sys.stdout
     out.write(f":{directive}\n")
     for c in cands:
-        out.write(c)
+        clean = _sanitize(c)
+        if not clean:
+            continue
+        out.write(clean)
         out.write("\n")
 
 

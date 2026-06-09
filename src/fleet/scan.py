@@ -22,18 +22,39 @@ import argparse
 import contextlib
 import json
 import os
+import sys
 from pathlib import Path
 
-from fleet.console import cyan, gray, green
+from fleet.console import cyan, gray, green, yellow
 from fleet.errors import FleetError
 from fleet.paths import REGISTRY_FILENAME
 from fleet.registry_tree import empty_node, expanded_registry
-from fleet.state import find_repos_root, load_registry
+from fleet.state import find_repos_root, invalidate_registry_cache, load_registry
 from fleet.walker import walk_repos
 
 # ---------------------------------------------------------------------------
 # Build the new structure from disk + existing config
 # ---------------------------------------------------------------------------
+
+def _scan_progress(found: int) -> None:
+    """Repaint the in-place "Found N…" counter on stderr (interactive only).
+
+    Goes to stderr so stdout capture (and the final summary) stay clean, and
+    only when stderr is a TTY so piped/CI runs aren't littered with carriage
+    returns.
+    """
+    if not getattr(sys.stderr, "isatty", lambda: False)():
+        return
+    sys.stderr.write(f"\r  Found {found} repositories so far...")
+    sys.stderr.flush()
+
+
+def _scan_progress_done(found: int) -> None:
+    if not getattr(sys.stderr, "isatty", lambda: False)():
+        return
+    sys.stderr.write(f"\r  Found {found} repositories.{' ' * 12}\n")
+    sys.stderr.flush()
+
 
 def _get_or_create(parent: dict, name: str, existing_node: dict | None) -> dict:
     """Return ``parent[name]``, creating it (and recovering sync/exclude from existing)."""
@@ -89,10 +110,22 @@ def _build_structure(scan_root: Path, expanded_existing: dict) -> tuple[dict, in
     for top_name, top_node in expanded_existing.items():
         _collect_listed(top_node, (top_name,))
 
+    seen_count = 0
     for repo_dir in walk_repos(scan_root):
+        seen_count += 1
+        if seen_count % 50 == 0:
+            _scan_progress(seen_count)
         try:
             rel = repo_dir.resolve().relative_to(scan_root_abs)
         except ValueError:
+            # Resolved outside the scan root (symlink/junction escaping the
+            # tree). Not an error — just not ours to register.
+            continue
+        except OSError as e:
+            # Repo vanished or became unreadable between discovery and
+            # resolution. Surface it rather than silently dropping it.
+            print(yellow(f"  note: skipped unreadable repo {repo_dir}: {e}"),
+                  file=sys.stderr)
             continue
         parts = list(rel.parts)
         if not parts:
@@ -148,6 +181,7 @@ def _build_structure(scan_root: Path, expanded_existing: dict) -> tuple[dict, in
             if structural_key not in previously_listed:
                 new_count += 1
 
+    _scan_progress_done(seen_count)
     return structure, total, new_count
 
 
@@ -335,6 +369,9 @@ def cmd_scan(_args: argparse.Namespace) -> int:
 
     final: dict = {"root": config_root, **structure}
     _atomic_write_json(target_path, final)
+    # We just rewrote fleet.json; drop the in-process cache so any later
+    # load_registry() in the same run (tests re-scan twice) reads fresh.
+    invalidate_registry_cache()
 
     enabled = _count_enabled(structure)
     print(green("✓ Scan complete."))

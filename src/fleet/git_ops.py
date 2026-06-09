@@ -6,6 +6,7 @@ sync.ps1, task.py:prepare_canonical, and task.py:cmd_sync.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from dataclasses import dataclass
@@ -15,17 +16,43 @@ from fleet.errors import FleetError
 
 # Patterns from sync.ps1's $invokeWithRetry — used to decide whether a git
 # invocation actually failed or just emitted noise (Windows filesystem
-# warnings, reftable advisories, etc.).
+# warnings, reftable advisories, etc.). Word boundaries keep a fatal message
+# that merely *mentions* "reftable"/"case-insensitive" from being downgraded
+# to a warning, and stop substrings (e.g. "cannot" inside another word) from
+# tripping the error gate.
 _ERROR_RE = re.compile(
-    r"fatal|error:|denied|not found|could not|cannot|rejected|authentication failed",
+    r"\bfatal\b|error:|\bdenied\b|\bnot found\b|\bcould not\b|\bcannot\b|"
+    r"\brejected\b|authentication failed",
     re.IGNORECASE,
 )
-_WARNING_RE = re.compile(r"case-insensitive|reftable|warning:", re.IGNORECASE)
+_WARNING_RE = re.compile(r"\b(?:case-insensitive|reftable)\b|warning:", re.IGNORECASE)
 _TRANSIENT_RE = re.compile(
-    r"503|502|504|timeout|temporarily unavailable|connection refused|"
+    r"\b(?:503|502|504)\b|\btimeout\b|temporarily unavailable|connection refused|"
     r"failed to connect",
     re.IGNORECASE,
 )
+
+# Network git ops (fetch/pull/ls-remote/set-head) can hang indefinitely on a
+# dead remote or stuck connection, so they get a bounded timeout with an env
+# override (a big-but-healthy fetch shouldn't be killed, yet a truly hung
+# connection mustn't block the whole run forever). Local ops are left
+# UNBOUNDED on purpose: `git worktree add` / `checkout` legitimately take a
+# long time when checking out a large working tree, and a fixed cap there
+# would turn a slow-but-fine task creation into a spurious failure.
+_DEFAULT_NETWORK_TIMEOUT = 120.0
+
+
+def _network_timeout() -> float:
+    """Network git timeout (seconds), overridable via ``FLEET_GIT_TIMEOUT``."""
+    raw = os.environ.get("FLEET_GIT_TIMEOUT")
+    if raw:
+        try:
+            value = float(raw)
+        except ValueError:
+            return _DEFAULT_NETWORK_TIMEOUT
+        if value > 0:
+            return value
+    return _DEFAULT_NETWORK_TIMEOUT
 
 
 @dataclass
@@ -46,11 +73,16 @@ class GitResult:
 
 
 def run_git(*args: str, cwd: Path | None = None, check: bool = True,
-            capture: bool = True) -> GitResult:
+            capture: bool = True,
+            timeout: float | None = None) -> GitResult:
     """Invoke git. Raises FleetError on non-zero exit when check=True.
 
     Raises FleetError (not Python's FileNotFoundError) when git isn't on PATH,
-    so callers don't have to special-case the install-git case.
+    so callers don't have to special-case the install-git case. ``timeout``
+    defaults to ``None`` (unbounded) so local operations that are slow but
+    healthy — a large ``worktree add`` / ``checkout`` — aren't killed; network
+    wrappers (fetch/pull/ls-remote) pass an explicit timeout so a dead remote
+    can't hang the whole run.
     """
     cmd = ["git", *args]
     # Pre-check cwd so a missing worktree directory doesn't get reported as
@@ -67,11 +99,19 @@ def run_git(*args: str, cwd: Path | None = None, check: bool = True,
             text=True,
             encoding="utf-8",
             errors="replace",
+            timeout=timeout,
         )
     except FileNotFoundError as e:
         raise FleetError(
             "git not found on PATH. Install Git for Windows and re-open the "
             f"shell. (underlying error: {e})"
+        ) from None
+    except subprocess.TimeoutExpired:
+        cwd_part = f" (in {cwd})" if cwd else ""
+        timeout_part = f"{timeout:g}" if timeout is not None else "?"
+        raise FleetError(
+            f"git {' '.join(args)} timed out after {timeout_part}s{cwd_part}. "
+            f"Check the network/remote, or raise the FLEET_GIT_TIMEOUT env var."
         ) from None
 
     result = GitResult(
@@ -118,14 +158,15 @@ def is_git_repo(path: Path) -> bool:
 def is_dirty(repo_path: Path) -> bool:
     """True if the working tree has uncommitted changes.
 
-    Returns False on any git failure (or if `repo_path` has vanished) so a
-    single broken worktree doesn't abort aggregate operations like
-    `fleet task list`.
+    A vanished ``repo_path`` is treated as "not dirty" (it's the expected
+    race during teardown). A genuine git failure — git missing from PATH, a
+    timeout, a corrupted repo — is *not* swallowed here; it propagates as a
+    FleetError so it can't masquerade as "clean". Aggregate callers that must
+    survive one broken worktree (e.g. ``fleet task list``) guard the call.
     """
-    try:
-        r = run_git("status", "--porcelain", cwd=repo_path, check=False)
-    except FleetError:
+    if not repo_path.is_dir():
         return False
+    r = run_git("status", "--porcelain", cwd=repo_path, check=False)
     if r.returncode != 0:
         return False
     return bool(r.stdout.strip())
@@ -141,7 +182,14 @@ def current_branch(repo_path: Path) -> str | None:
 
 
 def origin_url(repo_path: Path) -> str | None:
-    """Return the origin remote URL, or None if no origin is configured."""
+    """Return the origin remote URL, or None if no origin is configured.
+
+    A vanished ``repo_path`` (or a repo with no ``origin``) yields None. A
+    genuine git failure (missing binary, timeout) propagates rather than
+    being silently reported as "no origin".
+    """
+    if not repo_path.is_dir():
+        return None
     r = run_git("remote", "get-url", "origin", cwd=repo_path, check=False)
     if r.returncode != 0:
         return None
@@ -195,7 +243,8 @@ def detect_default_branch(repo_path: Path, *, offline: bool = False,
 
     if allow_set_head and not offline:
         refresh = run_git("remote", "set-head", "origin", "--auto",
-                          cwd=repo_path, check=False)
+                          cwd=repo_path, check=False,
+                          timeout=_network_timeout())
         if refresh.returncode == 0:
             r = run_git("symbolic-ref", "--quiet", "--short",
                         "refs/remotes/origin/HEAD", cwd=repo_path, check=False)
@@ -248,7 +297,8 @@ def fetch_prune(repo_path: Path, *, no_tags: bool = True) -> GitResult:
     if no_tags:
         args.append("--no-tags")
     args.append("origin")
-    return run_git(*args, cwd=repo_path, check=False)
+    return run_git(*args, cwd=repo_path, check=False,
+                   timeout=_network_timeout())
 
 
 def pull_ff_only(repo_path: Path, branch: str, *, no_tags: bool = True) -> GitResult:
@@ -257,7 +307,19 @@ def pull_ff_only(repo_path: Path, branch: str, *, no_tags: bool = True) -> GitRe
     if no_tags:
         args.append("--no-tags")
     args.extend(["origin", branch])
-    return run_git(*args, cwd=repo_path, check=False)
+    return run_git(*args, cwd=repo_path, check=False,
+                   timeout=_network_timeout())
+
+
+def fetch_branch_ff(repo_path: Path, branch: str) -> GitResult:
+    """`git fetch origin <branch>:<branch>` — fast-forward a non-checked-out branch.
+
+    Used to refresh the canonical's local ``<default>`` ref from origin when
+    the canonical isn't currently on that branch (so a plain pull can't run).
+    Network op, so it carries the network timeout.
+    """
+    return run_git("fetch", "origin", f"{branch}:{branch}",
+                   cwd=repo_path, check=False, timeout=_network_timeout())
 
 
 def checkout(repo_path: Path, branch: str) -> GitResult:
@@ -289,4 +351,4 @@ def worktree_repair(canonical: Path, worktree_path: Path) -> GitResult:
 def ls_remote_head(repo_path: Path) -> GitResult:
     """`git ls-remote --exit-code origin HEAD` — used as the auth probe."""
     return run_git("ls-remote", "--exit-code", "origin", "HEAD",
-                   cwd=repo_path, check=False)
+                   cwd=repo_path, check=False, timeout=_network_timeout())

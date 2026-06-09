@@ -16,7 +16,6 @@ from fleet.discovery import RepoInfo
 from fleet.errors import FleetError
 from fleet.tasks.worktree import assert_no_leaf_collision
 
-
 _CASE_INSENSITIVE_FS = os.path.normcase("A") == os.path.normcase("a")
 
 
