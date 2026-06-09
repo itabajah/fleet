@@ -116,6 +116,22 @@ def test_fleets_rename_cli(tmp_path, capsys) -> None:
     assert cfg.default == "fresh"
 
 
+def test_fleets_rename_note_unscoped(tmp_path, capsys) -> None:
+    """Under an unscoped convention, branch names don't carry the fleet, so
+    the rename note says branches are unaffected instead of showing a remap."""
+    from fleet.state import BranchConfig
+    cfg = FleetsConfig()
+    cfg.add("old", tmp_path)
+    cfg.branch = BranchConfig(prefix="wip", scoped=False)
+    cfg.save()
+    capsys.readouterr()
+    rc = cmd_fleets_rename(argparse.Namespace(old="old", new="fresh"))
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "aren't fleet-scoped" in out
+    assert "wip" in out
+
+
 def test_remove_last_clears_default(tmp_path, capsys) -> None:
     cmd_fleets_add(_add_args("alpha", tmp_path))
     capsys.readouterr()

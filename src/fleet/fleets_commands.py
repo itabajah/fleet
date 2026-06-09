@@ -77,10 +77,18 @@ def cmd_fleets_rename(args: argparse.Namespace) -> int:
     print(green(f"✓ Renamed fleet '{args.old}' → '{args.new}'"))
     if cfg.default == args.new:
         print(gray("  (still the default)"))
-    print(yellow(
-        f"  Note: existing task branches keep the old name "
-        f"(`task/{args.old}/...`). New tasks use `task/{args.new}/...`."
-    ))
+    bc = cfg.branch
+    if bc.scoped:
+        print(yellow(
+            f"  Note: existing task branches keep the old name "
+            f"(`{bc.prefix}/{args.old}/...`). "
+            f"New tasks use `{bc.prefix}/{args.new}/...`."
+        ))
+    else:
+        print(gray(
+            f"  Task branches aren't fleet-scoped (prefix `{bc.prefix}`), "
+            f"so branch names are unaffected."
+        ))
     return 0
 
 

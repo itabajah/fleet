@@ -15,7 +15,6 @@ from pathlib import Path
 from fleet import git_ops
 from fleet.discovery import RepoInfo
 from fleet.errors import FleetError
-from fleet.tasks.validation import task_branch
 
 # True on Windows / default macOS HFS+ where 'Foo' and 'foo' collide on disk.
 _FS_CASE_INSENSITIVE = os.path.normcase("A") == os.path.normcase("a")
@@ -189,17 +188,22 @@ def prepare_canonicals_parallel(
     return result
 
 
-def add_worktree(repo: RepoInfo, name: str, default_branch: str,
+def add_worktree(repo: RepoInfo, branch: str, default_branch: str,
                  task_workspace: Path, *,
                  reuse_existing: bool = False) -> tuple[Path, bool]:
     """Create a worktree for ``repo`` under the task workspace.
+
+    ``branch`` is the task's branch name, supplied by the caller — rendered
+    from config for a new task (``task new``) or read from ``manifest.branch``
+    for an existing one (``task add-repo``). It is never recomputed here, so a
+    later change to the branch convention can't desync a freshly-added
+    worktree from the task's other branches.
 
     Returns ``(worktree_path, branch_is_new)``. ``branch_is_new`` is False
     when ``reuse_existing`` was honoured (the canonical already had the
     task's branch) — callers must NOT ``git branch -D`` that branch during
     rollback, since it pre-existed this invocation.
     """
-    branch = task_branch(name)
     wt_path = task_workspace / repo.name
     label = f"[{repo.name}]"
 

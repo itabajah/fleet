@@ -8,7 +8,7 @@ import pytest
 
 from fleet.discovery import RepoInfo
 from fleet.errors import FleetError
-from fleet.state import set_active_fleet
+from fleet.state import BranchConfig, set_active_fleet
 from fleet.tasks.validation import (
     resolve_repo,
     task_branch,
@@ -62,6 +62,18 @@ def test_task_branch_uses_active_fleet(tmp_path: Path) -> None:
 def test_task_branch_raises_without_active_fleet() -> None:
     with pytest.raises(FleetError):
         task_branch("bug-1")
+
+
+def test_task_branch_unscoped_omits_fleet(tmp_path: Path) -> None:
+    set_active_fleet("alpha", tmp_path,
+                     BranchConfig(prefix="wip", scoped=False))
+    assert task_branch("bug-1") == "wip/bug-1"
+
+
+def test_task_branch_custom_prefix_scoped(tmp_path: Path) -> None:
+    set_active_fleet("alpha", tmp_path,
+                     BranchConfig(prefix="feature", scoped=True))
+    assert task_branch("bug-1") == "feature/alpha/bug-1"
 
 
 # ---------------------------------------------------------------------------

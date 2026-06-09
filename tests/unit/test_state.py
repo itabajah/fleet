@@ -52,6 +52,35 @@ def test_require_active_fleet_raises_when_unset() -> None:
         state.require_active_fleet()
 
 
+# ---------------------------------------------------------------------------
+# branch config
+# ---------------------------------------------------------------------------
+
+def test_branch_config_defaults_when_unset() -> None:
+    bc = state.branch_config()
+    assert bc == state.BranchConfig()
+    assert bc.prefix == "task"
+    assert bc.scoped is True
+
+
+def test_set_active_fleet_pins_branch_config(tmp_path: Path) -> None:
+    bc = state.BranchConfig(prefix="wip", scoped=False)
+    state.set_active_fleet("demo", tmp_path, bc)
+    assert state.branch_config() == bc
+
+
+def test_set_active_fleet_without_branch_uses_default(tmp_path: Path) -> None:
+    state.set_active_fleet("demo", tmp_path)
+    assert state.branch_config() == state.BranchConfig()
+
+
+def test_reset_state_clears_branch_config(tmp_path: Path) -> None:
+    state.set_active_fleet("demo", tmp_path,
+                           state.BranchConfig(prefix="wip", scoped=False))
+    state.reset_state()
+    assert state.branch_config() == state.BranchConfig()
+
+
 def test_tasks_root_per_fleet(tmp_path: Path,
                               monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FLEET_TASKS_ROOT", str(tmp_path / "T"))

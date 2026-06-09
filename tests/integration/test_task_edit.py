@@ -20,7 +20,7 @@ from fleet.tasks.edit import (
 )
 from fleet.tasks.lifecycle import cmd_end, cmd_new
 from fleet.tasks.manifest import Manifest
-from helpers.git import make_dirty
+from helpers.git import _git, make_dirty
 
 # ---------------------------------------------------------------------------
 # argparse.Namespace builders
@@ -139,6 +139,30 @@ class TestAddRepo:
         assert [r.name for r in Manifest.load(tasks_root() / "t").repos] \
             == ["alpha", "beta"]
 
+    def test_add_repo_uses_recorded_branch_not_current_config(
+        self, populated_fleet, capsys,
+    ) -> None:
+        """A convention change AFTER task creation must not desync a newly
+        added worktree: add-repo reuses ``manifest.branch``, never re-renders."""
+        from fleet.state import BranchConfig, set_active_fleet
+        # Create under the default convention (task/demo/t).
+        cmd_new(_new_args("t", "alpha"))
+        capsys.readouterr()
+        assert Manifest.load(tasks_root() / "t").branch == "task/demo/t"
+        # Operator switches the convention afterwards.
+        set_active_fleet("demo", populated_fleet.root,
+                         BranchConfig(prefix="wip", scoped=False))
+        # add-repo must branch beta on the RECORDED name, not "wip/t".
+        rc = cmd_add_repo(_add_args("t", "beta"))
+        assert rc == 0
+        ws = tasks_root() / "t"
+        assert Manifest.load(ws).branch == "task/demo/t"
+        beta = populated_fleet.repos["beta"]
+        assert "task/demo/t" in _git("branch", "--list", "task/demo/t",
+                                     cwd=beta).stdout
+        assert "wip/t" not in _git("branch", "--list", "wip/t",
+                                   cwd=beta).stdout
+
 
 class TestRemoveRepo:
     def test_happy_path(self, populated_fleet, capsys) -> None:
@@ -229,6 +253,28 @@ class TestRename:
         ctx = (root / "new" / "context.md").read_text(encoding="utf-8")
         assert ctx.startswith("# new\n")
         assert "task/demo/new" in ctx
+
+    def test_rename_under_unscoped_convention(self, populated_fleet,
+                                              capsys) -> None:
+        """Rename recomputes the branch from config; under an unscoped
+        convention that's ``<prefix>/<new>``, applied to every canonical."""
+        from fleet.state import BranchConfig, set_active_fleet
+        set_active_fleet("demo", populated_fleet.root,
+                         BranchConfig(prefix="wip", scoped=False))
+        cmd_new(_new_args("old", "alpha"))
+        capsys.readouterr()
+        assert Manifest.load(tasks_root() / "old").branch == "wip/old"
+        rc = cmd_rename(_rename_args("old", "new"))
+        assert rc == 0
+        m = Manifest.load(tasks_root() / "new")
+        assert m.branch == "wip/new"
+        alpha = populated_fleet.repos["alpha"]
+        r = git_ops.run_git("show-ref", "--verify", "--quiet",
+                            "refs/heads/wip/new", cwd=alpha, check=False)
+        assert r.ok
+        r2 = git_ops.run_git("show-ref", "--verify", "--quiet",
+                             "refs/heads/wip/old", cwd=alpha, check=False)
+        assert not r2.ok
 
     def test_post_rename_worktree_repaired(self, populated_fleet, capsys) -> None:
         """`git worktree remove` from the canonical must work after rename.

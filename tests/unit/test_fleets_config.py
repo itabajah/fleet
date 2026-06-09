@@ -16,6 +16,7 @@ from fleet.fleets_config import (
     _validate_fleet_name,
     config_path,
 )
+from fleet.state import BranchConfig
 
 # ---------------------------------------------------------------------------
 # _config_file precedence
@@ -346,3 +347,70 @@ def test_config_lock_falls_back_with_warning(
     err = capsys.readouterr().err
     assert "acquired" in err
     assert "without lock" in err
+
+
+# ---------------------------------------------------------------------------
+# branch convention
+# ---------------------------------------------------------------------------
+
+def _write_config(text: str) -> None:
+    """Write raw fleets.json text to the sandboxed config path."""
+    path = config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def test_branch_absent_yields_default() -> None:
+    _write_config('{"default": null, "fleets": {}}')
+    assert FleetsConfig.load().branch == BranchConfig()
+
+
+def test_branch_custom_parsed() -> None:
+    _write_config('{"fleets": {}, "branch": {"prefix": "wip", "scoped": false}}')
+    assert FleetsConfig.load().branch == BranchConfig(prefix="wip", scoped=False)
+
+
+def test_branch_prefix_only_defaults_scoped() -> None:
+    _write_config('{"fleets": {}, "branch": {"prefix": "feature"}}')
+    assert FleetsConfig.load().branch == BranchConfig(prefix="feature", scoped=True)
+
+
+def test_branch_scoped_only_defaults_prefix() -> None:
+    _write_config('{"fleets": {}, "branch": {"scoped": false}}')
+    assert FleetsConfig.load().branch == BranchConfig(prefix="task", scoped=False)
+
+
+@pytest.mark.parametrize("bad", [
+    '{"branch": []}',
+    '{"branch": "task"}',
+    '{"branch": {"prefix": ""}}',
+    '{"branch": {"prefix": 5}}',
+    '{"branch": {"scoped": "yes"}}',
+    '{"branch": {"scoped": 1}}',
+    '{"branch": {"prefix": "bad prefix"}}',
+    '{"branch": {"prefix": "task/"}}',
+    '{"branch": {"prefix": "/task"}}',
+    '{"branch": {"prefix": "-lead"}}',
+])
+def test_branch_malformed_raises(bad: str) -> None:
+    _write_config(bad)
+    with pytest.raises(FleetError):
+        FleetsConfig.load()
+
+
+def test_save_omits_default_branch(tmp_path: Path) -> None:
+    cfg = FleetsConfig()
+    cfg.add("alpha", tmp_path)
+    cfg.save()
+    data = json.loads(config_path().read_text(encoding="utf-8"))
+    assert "branch" not in data
+
+
+def test_save_writes_custom_branch_roundtrip(tmp_path: Path) -> None:
+    cfg = FleetsConfig()
+    cfg.add("alpha", tmp_path)
+    cfg.branch = BranchConfig(prefix="wip", scoped=False)
+    cfg.save()
+    data = json.loads(config_path().read_text(encoding="utf-8"))
+    assert data["branch"] == {"prefix": "wip", "scoped": False}
+    assert FleetsConfig.load().branch == BranchConfig(prefix="wip", scoped=False)

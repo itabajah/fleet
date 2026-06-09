@@ -27,7 +27,8 @@ dependencies** — Python stdlib + `git` is the entire stack.
   `fleet.json`. Manual `sync: false` and `exclude` entries survive
   re-scans; single-child folder chains collapse for compact output.
 - **Task workspaces**: `fleet task new bug-123 --repos foo,bar` creates
-  one `git worktree` per repo on a shared `task/<fleet>/bug-123` branch,
+  one `git worktree` per repo on a shared `task/<fleet>/bug-123` branch
+  (the default, configurable naming convention),
   with a manifest, scratch dir, and one-shot teardown. Canonicals are
   fetched/pulled in parallel, so creating a many-repo task is fast.
 - **Multiple fleets**: register any number of named fleets (each is a
@@ -176,6 +177,32 @@ either with the `FLEET_CONFIG_PATH` env var):
 }
 ```
 
+#### Branch naming convention
+
+By default every task's git branch is named `task/<fleet>/<name>` — the
+`task/` prefix, namespaced by the active fleet so two fleets sharing a
+physical clone never collide. Override this globally with an optional
+`branch` key in `fleets.json`:
+
+```json
+{
+  "branch": { "prefix": "task", "scoped": true },
+  "default": "main",
+  "fleets": { "main": { "root": "C:\\src" } }
+}
+```
+
+- `prefix` — the leading branch segment (default `"task"`).
+- `scoped` — whether the `<fleet>` segment is included (default `true`):
+  - `scoped: true`  → `<prefix>/<fleet>/<name>` (e.g. `task/main/bug-123`)
+  - `scoped: false` → `<prefix>/<name>` (e.g. `wip/bug-123`)
+
+Omit the `branch` key to keep the default. The setting is global (no
+per-fleet override) and validated on load — `prefix` must be non-empty
+and the rendered branch must be a legal git ref. Existing tasks keep the
+branch recorded in their `task.json`; only newly-created tasks use a
+changed convention.
+
 ### Registry: `fleet.json`
 
 Lives at the active fleet's repos root (`<fleet-root>/fleet.json`).
@@ -214,7 +241,8 @@ at a fast scratch disk).
 
 Each task gets:
 
-- one `git worktree` per chosen repo (checked out on `task/<fleet>/<name>`,
+- one `git worktree` per chosen repo (checked out on `task/<fleet>/<name>`
+  by default — see [Branch naming convention](#branch-naming-convention) —
   branched from the canonical repo's default branch),
 - a `task.json` manifest recording branch, repos, creation time, and
   per-repo worktree paths,
@@ -230,7 +258,8 @@ through dirty worktrees.
 Tasks can also be edited in place without ending and recreating them:
 
 - `fleet task add-repo <name> --repos foo` adds a fresh worktree on the
-  existing `task/<fleet>/<name>` branch and appends it to `task.json`.
+  task's existing branch (read from `task.json`, not re-derived) and
+  appends it to `task.json`.
 - `fleet task remove-repo <name> --repos foo` tears down that repo's
   worktree (refuses on dirty/unpushed unless `--force`) and drops it
   from the manifest.
@@ -316,7 +345,8 @@ they share state on disk:
 2. **Same physical clone shared by both fleets** (e.g. fleet A is
    `C:\src` and fleet B is `C:\src\subset`):
    - **Tasks are namespaced by fleet on disk** (`<TASKS_ROOT>/<fleet>/<task>/`)
-     and **branches are namespaced by fleet in git** (`task/<fleet>/<name>`).
+     and **branches are namespaced by fleet in git** (`task/<fleet>/<name>`,
+     by default; see [Branch naming convention](#branch-naming-convention)).
      Two fleets can each have a task called `bug-123` against the
      same shared repo without colliding.
    - `fleet sync` from either fleet pulls the same canonical `.git`.

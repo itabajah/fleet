@@ -124,7 +124,7 @@ def _activate_fleet_from_words(words: Sequence[str]) -> bool:
         from fleet.state import set_active_fleet
         cfg = FleetsConfig.load()
         entry = cfg.resolve(override)
-        set_active_fleet(entry.name, entry.root)
+        set_active_fleet(entry.name, entry.root, cfg.branch)
         return True
     except Exception:
         return False

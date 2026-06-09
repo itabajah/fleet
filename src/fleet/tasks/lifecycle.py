@@ -111,7 +111,7 @@ def cmd_new(args: argparse.Namespace) -> int:
         branch_by_repo = prepare_canonicals_parallel(chosen, no_pull=args.no_pull)
         for repo in chosen:
             default = branch_by_repo[id(repo)]
-            wt, _branch_is_new = add_worktree(repo, name, default, workspace)
+            wt, _branch_is_new = add_worktree(repo, branch, default, workspace)
             created_worktrees.append((repo, wt, branch))
 
         context_md = workspace / "context.md"

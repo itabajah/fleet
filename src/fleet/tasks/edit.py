@@ -101,7 +101,10 @@ def cmd_add_repo(args: argparse.Namespace) -> int:
         assert_no_leaf_collision(chosen, workspace,
                                  existing_leaves=existing_leaves)
 
-        branch = task_branch(name)
+        # Use the task's RECORDED branch, never a freshly-rendered one: the
+        # convention may have changed since the task was created, and every
+        # repo in a task must share a single branch name.
+        branch = manifest.branch
         print(f"Adding {len(chosen)} repo(s) to task '{name}' (branch {branch}):")
         for r in chosen:
             print(f"  - {r.display_name}")
@@ -125,7 +128,7 @@ def cmd_add_repo(args: argparse.Namespace) -> int:
             for repo in chosen:
                 default = branch_by_repo[id(repo)]
                 wt, branch_is_new = add_worktree(
-                    repo, name, default, workspace, reuse_existing=True,
+                    repo, branch, default, workspace, reuse_existing=True,
                 )
                 created.append((repo, wt, branch, branch_is_new))
 

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from fleet.discovery import RepoInfo
 from fleet.errors import FleetError
-from fleet.state import require_active_fleet
+from fleet.state import branch_config, require_active_fleet
 
 if TYPE_CHECKING:
     from fleet.tasks.manifest import Manifest, RepoEntry
@@ -100,16 +100,30 @@ def validate_branch(branch: str, *, context: str = "branch") -> None:
 
 
 def task_branch(name: str) -> str:
-    """Branch name created/managed by fleet for a task.
+    """Branch name created/managed by fleet for a *new* task.
 
-    Namespaced by the active fleet so two fleets sharing a physical
-    canonical repo can each have a same-named task without their git
-    branches colliding. Format: ``task/<fleet>/<task>``.
+    Rendered from the global convention pinned in ``fleets.json``
+    (:class:`fleet.state.BranchConfig`). With ``scoped`` true the active fleet
+    is inserted as a middle segment so two fleets sharing a physical canonical
+    repo can each have a same-named task without their git branches
+    colliding::
 
-    Both fleet names and task names are validated to be git-ref-safe
-    (alphanum + ``.`` ``_`` ``-``), so the resulting ref is always valid.
+        scoped=True   ->  <prefix>/<fleet>/<task>   (default: task/<fleet>/<task>)
+        scoped=False  ->  <prefix>/<task>
+
+    Only callers creating a task (``task new``) or deliberately renaming its
+    branch (``task rename``) render from config; everything operating on an
+    existing task reads ``manifest.branch`` instead, so a later config change
+    never desyncs a task's worktrees from its recorded branch.
+
+    Both fleet and task names are validated git-ref-safe, and the rendered
+    branch is checked against :func:`validate_branch` at config-load time, so
+    the resulting ref is always valid.
     """
-    return f"task/{require_active_fleet()}/{name}"
+    cfg = branch_config()
+    if cfg.scoped:
+        return f"{cfg.prefix}/{require_active_fleet()}/{name}"
+    return f"{cfg.prefix}/{name}"
 
 
 def resolve_repo(token: str, all_repos: list[RepoInfo]) -> RepoInfo:

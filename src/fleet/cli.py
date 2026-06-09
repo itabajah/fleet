@@ -192,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             cfg = FleetsConfig.load()
             entry = cfg.resolve(getattr(args, "fleet", None))
-            set_active_fleet(entry.name, entry.root)
+            set_active_fleet(entry.name, entry.root, cfg.branch)
         except FleetError as e:
             eprint(f"ERROR: {e}", color="31")
             return e.exit_code

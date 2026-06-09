@@ -14,33 +14,59 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 from fleet.errors import FleetError
 from fleet.paths import BUNDLES_FILENAME, REGISTRY_FILENAME, tasks_root_base
 
+
+@dataclass(frozen=True)
+class BranchConfig:
+    """How fleet renders the git branch name for a *new* task.
+
+    ``prefix`` is the leading ref segment; ``scoped`` controls whether the
+    active fleet name is inserted as a middle segment. The defaults reproduce
+    the historical ``task/<fleet>/<task>`` format, so an absent ``branch`` key
+    in ``fleets.json`` changes nothing.
+    """
+
+    prefix: str = "task"
+    scoped: bool = True
+
+
 _repos_root: Path | None = None
 _active_fleet_name: str | None = None
+_branch_config: BranchConfig | None = None
 _registry_cache: dict | None = None
 _registry_cache_path: Path | None = None
 
 
 def reset_state() -> None:
     """Wipe pinned active-fleet state. Used by tests; harmless in CLI runs."""
-    global _repos_root, _active_fleet_name, _registry_cache, _registry_cache_path
+    global _repos_root, _active_fleet_name, _branch_config
+    global _registry_cache, _registry_cache_path
     _repos_root = None
     _active_fleet_name = None
+    _branch_config = None
     _registry_cache = None
     _registry_cache_path = None
 
 
-def set_active_fleet(name: str, root: Path) -> None:
+def set_active_fleet(name: str, root: Path,
+                     branch: BranchConfig | None = None) -> None:
     """Pin the active fleet for the rest of this process.
+
+    ``branch`` is the global branch-naming convention loaded from
+    ``fleets.json``; ``None`` selects the built-in default
+    (``task/<fleet>/<task>``). It is pinned here so
+    :func:`fleet.tasks.validation.task_branch` can render new branches
+    without re-reading the config.
 
     Raises :class:`FleetError` if the recorded root no longer exists on disk
     (deleted/renamed since ``fleet fleets add``).
     """
-    global _repos_root, _active_fleet_name
+    global _repos_root, _active_fleet_name, _branch_config
     if not root.is_dir():
         raise FleetError(
             f"Fleet '{name}' root no longer exists at {root}.\n"
@@ -48,11 +74,17 @@ def set_active_fleet(name: str, root: Path) -> None:
         )
     _repos_root = root.resolve()
     _active_fleet_name = name
+    _branch_config = branch
 
 
 def active_fleet_name() -> str | None:
     """Name of the active fleet, or None if no fleet has been pinned yet."""
     return _active_fleet_name
+
+
+def branch_config() -> BranchConfig:
+    """Active branch-naming convention, or the built-in default if unset."""
+    return _branch_config if _branch_config is not None else BranchConfig()
 
 
 def require_active_fleet() -> str:

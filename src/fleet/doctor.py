@@ -55,6 +55,10 @@ class _Report:
 
 def _check_fleets(cfg: FleetsConfig, report: _Report) -> None:
     print(cyan("Fleets"))
+    bc = cfg.branch
+    sample = (f"{bc.prefix}/<fleet>/<task>" if bc.scoped
+              else f"{bc.prefix}/<task>")
+    print(gray(f"  branch convention: {sample}"))
     if not cfg.fleets:
         report.notice("No fleets configured. Add one with `fleet fleets add`.")
         return
@@ -83,7 +87,7 @@ def _check_active(cfg: FleetsConfig, override: str | None,
     if not entry.root.is_dir():
         return  # already reported in _check_fleets
 
-    set_active_fleet(entry.name, entry.root)
+    set_active_fleet(entry.name, entry.root, cfg.branch)
     invalidate_registry_cache()
 
     print(cyan(f"\nRegistry (fleet '{entry.name}')"))
@@ -159,12 +163,22 @@ def _check_active(cfg: FleetsConfig, override: str | None,
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
-    cfg = FleetsConfig.load()
     print(gray(f"Config file: {config_path()}\n"))
     report = _Report()
 
-    _check_fleets(cfg, report)
-    _check_active(cfg, getattr(args, "fleet", None), report)
+    # Load defensively: a malformed config (e.g. a bad ``branch`` convention)
+    # is exactly what doctor exists to diagnose, so report it as a problem
+    # rather than letting the FleetError abort the whole check.
+    try:
+        cfg: FleetsConfig | None = FleetsConfig.load()
+    except FleetError as e:
+        print(cyan("Fleets"))
+        report.problem(str(e))
+        cfg = None
+
+    if cfg is not None:
+        _check_fleets(cfg, report)
+        _check_active(cfg, getattr(args, "fleet", None), report)
 
     print()
     if report.problems:

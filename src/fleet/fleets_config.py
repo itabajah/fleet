@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from fleet.errors import FleetError
+from fleet.state import BranchConfig
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-]{0,31}$")
 
@@ -118,6 +119,7 @@ class FleetEntry:
 class FleetsConfig:
     default: str | None = None
     fleets: dict[str, FleetEntry] = field(default_factory=dict)
+    branch: BranchConfig = field(default_factory=BranchConfig)
 
     # ------------------------------ load / save ------------------------------
 
@@ -145,19 +147,28 @@ class FleetsConfig:
             default = data.get("default") if isinstance(data, dict) else None
             if not isinstance(default, str) or default not in fleets:
                 default = None
-            return cls(default=default, fleets=fleets)
+            branch = _parse_branch_config(data, path)
+            return cls(default=default, fleets=fleets, branch=branch)
         return cls(default=None, fleets={})
 
     def save(self) -> None:
         path = _config_file()
         path.parent.mkdir(parents=True, exist_ok=True)
-        data = {
+        data: dict[str, object] = {
             "default": self.default,
             "fleets": {
                 name: {"root": str(entry.root)}
                 for name, entry in sorted(self.fleets.items())
             },
         }
+        # Only persist a ``branch`` key when it diverges from the built-in
+        # default, so a default config stays byte-for-byte what it was before
+        # this setting existed.
+        if self.branch != BranchConfig():
+            data["branch"] = {
+                "prefix": self.branch.prefix,
+                "scoped": self.branch.scoped,
+            }
         tmp = path.with_suffix(path.suffix + ".tmp")
         tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
         try:
@@ -213,9 +224,10 @@ class FleetsConfig:
         """Rename fleet ``old`` to ``new``, preserving its root and default-ness.
 
         Does not touch anything on disk under the fleet root (``fleet.json``,
-        tasks, branches): only the registry mapping changes. Task branches are
-        namespaced by fleet name, so existing ``task/<old>/...`` branches keep
-        their old name — the caller is told as much by the command handler.
+        tasks, branches): only the registry mapping changes. Existing task
+        branches keep whatever name is recorded in their ``task.json`` (under
+        the default scoped convention that's ``task/<old>/...``) — the command
+        handler tells the user as much, tailored to the active convention.
         """
         if old not in self.fleets:
             raise FleetError(
@@ -263,8 +275,11 @@ class FleetsConfig:
 def _validate_fleet_name(name: str) -> None:
     """Reject fleet names that aren't safe to use as a git ref segment.
 
-    The name appears in ``task/<fleet>/<task>`` git refs, so it must satisfy
-    git's ref-format rules in addition to our character whitelist.
+    Under the default (scoped) convention the name appears as a middle
+    segment of ``<prefix>/<fleet>/<task>`` git refs, so it must satisfy
+    git's ref-format rules in addition to our character whitelist. We enforce
+    this unconditionally — even when ``scoped`` is off — so toggling the
+    convention can never retroactively invalidate an existing fleet name.
     """
     if not _NAME_RE.match(name):
         raise FleetError(
@@ -279,6 +294,60 @@ def _validate_fleet_name(name: str) -> None:
             "ref (no '..', no leading/trailing '.', no '.lock' suffix, "
             "no '@{')."
         )
+
+
+def _parse_branch_config(data: object, path: Path) -> BranchConfig:
+    """Parse + validate the optional ``branch`` key from ``fleets.json``.
+
+    An absent key yields the default convention. When present it must be an
+    object with an optional non-empty string ``prefix`` (default ``"task"``)
+    and optional bool ``scoped`` (default ``True``). The *rendered* branch is
+    checked against the same git-ref-safety rules the rest of the CLI uses, so
+    a typo'd or hostile prefix fails loudly here rather than deep inside a
+    later ``git`` invocation.
+    """
+    if not isinstance(data, dict) or "branch" not in data:
+        return BranchConfig()
+    raw = data["branch"]
+    if not isinstance(raw, dict):
+        raise FleetError(
+            f"Malformed fleets config at {path}: 'branch' must be an object "
+            f"with optional 'prefix' and 'scoped' keys."
+        )
+    prefix = raw.get("prefix", "task")
+    if not isinstance(prefix, str) or not prefix:
+        raise FleetError(
+            f"Malformed fleets config at {path}: branch 'prefix' must be a "
+            f"non-empty string (got {prefix!r})."
+        )
+    scoped = raw.get("scoped", True)
+    if not isinstance(scoped, bool):
+        raise FleetError(
+            f"Malformed fleets config at {path}: branch 'scoped' must be a "
+            f"boolean (got {scoped!r})."
+        )
+    cfg = BranchConfig(prefix=prefix, scoped=scoped)
+    _validate_branch_config(cfg, path)
+    return cfg
+
+
+def _validate_branch_config(cfg: BranchConfig, path: Path) -> None:
+    """Ensure a branch rendered from ``cfg`` passes git-ref-safety checks."""
+    # Lazy import: validation imports state, which is already imported here at
+    # module scope — keep validation off this module's import path until it's
+    # actually needed.
+    from fleet.tasks.validation import validate_branch
+    # Representative segments (each independently valid) so any failure is
+    # attributable to ``prefix`` / ``scoped``, not to the sample fleet/task.
+    sample = (f"{cfg.prefix}/fleet/task" if cfg.scoped
+              else f"{cfg.prefix}/task")
+    try:
+        validate_branch(sample, context="rendered task branch")
+    except FleetError as e:
+        raise FleetError(
+            f"Invalid branch convention in fleets config at {path}: {e} "
+            f"(prefix={cfg.prefix!r}, scoped={cfg.scoped})."
+        ) from e
 
 
 def config_path() -> Path:
